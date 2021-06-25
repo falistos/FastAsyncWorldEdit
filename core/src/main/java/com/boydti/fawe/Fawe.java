@@ -258,7 +258,6 @@ public class Fawe {
          */
         this.setupMemoryListener();
         this.timer = new FaweTimer();
-        Fawe.this.IMP.setupVault();
 
         File jar = MainUtil.getJarFile();
         File extraBlocks = MainUtil.copyFile(jar, "extrablocks.json", null);

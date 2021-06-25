@@ -11,7 +11,6 @@ import com.boydti.fawe.bukkit.regions.*;
 import com.boydti.fawe.bukkit.util.BukkitReflectionUtils;
 import com.boydti.fawe.bukkit.util.BukkitTaskMan;
 import com.boydti.fawe.bukkit.util.ItemUtil;
-import com.boydti.fawe.bukkit.util.VaultUtil;
 import com.boydti.fawe.bukkit.util.cui.CUIListener;
 import com.boydti.fawe.bukkit.util.cui.StructureCUI;
 import com.boydti.fawe.bukkit.util.image.BukkitImageViewer;
@@ -66,7 +65,6 @@ import org.primesoft.blockshub.BlocksHubBukkit;
 public class FaweBukkit implements IFawe, Listener {
 
     private final BukkitMain plugin;
-    private VaultUtil vault;
     private WorldEditPlugin worldedit;
     private ItemUtil itemUtil;
 
@@ -76,10 +74,6 @@ public class FaweBukkit implements IFawe, Listener {
 
     private boolean listeningCui;
     private CUIListener cuiListener;
-
-    public VaultUtil getVault() {
-        return this.vault;
-    }
 
     public WorldEditPlugin getWorldEditPlugin() {
         if (this.worldedit == null) {
@@ -331,19 +325,6 @@ public class FaweBukkit implements IFawe, Listener {
         return tmp;
     }
 
-    /**
-     * Vault isn't required, but used for setting player permissions (WorldEdit bypass)
-     * @return
-     */
-    @Override
-    public void setupVault() {
-        try {
-            this.vault = new VaultUtil();
-        } catch (final Throwable e) {
-            this.debug("&dVault is used for persistent `/wea` toggles.");
-        }
-    }
-
     @Override
     public String getDebugInfo() {
         StringBuilder msg = new StringBuilder();
@@ -538,16 +519,6 @@ public class FaweBukkit implements IFawe, Listener {
             try {
                 managers.add(new GriefPreventionFeature(griefpreventionPlugin, this));
                 Fawe.debug("Plugin 'GriefPrevention' found. Using it now.");
-            } catch (final Throwable e) {
-                MainUtil.handleError(e);
-            }
-        }
-
-        final Plugin aSkyBlock = Bukkit.getServer().getPluginManager().getPlugin("ASkyBlock");
-        if ((aSkyBlock != null) && aSkyBlock.isEnabled()) {
-            try {
-                managers.add(new ASkyBlockHook(aSkyBlock, this));
-                Fawe.debug("Plugin 'ASkyBlock' found. Using it now.");
             } catch (final Throwable e) {
                 MainUtil.handleError(e);
             }

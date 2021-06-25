@@ -22,8 +22,6 @@ public interface IFawe {
 
     public FawePlayer wrap(final Object obj);
 
-    public void setupVault();
-
     public TaskManager getTaskManager();
 
     public FaweQueue getNewQueue(World world, boolean fast);
