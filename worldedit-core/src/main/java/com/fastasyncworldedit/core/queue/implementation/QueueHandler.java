@@ -14,7 +14,15 @@ import com.fastasyncworldedit.core.queue.implementation.chunk.ChunkCache;
 import com.fastasyncworldedit.core.util.MemUtil;
 import com.fastasyncworldedit.core.util.TaskManager;
 import com.fastasyncworldedit.core.util.collection.CleanableThreadLocal;
+import com.fastasyncworldedit.core.util.task.ChunkTarget;
+import com.fastasyncworldedit.core.util.task.EntityTarget;
+import com.fastasyncworldedit.core.util.task.EntityTask;
+import com.fastasyncworldedit.core.util.task.EntityTicket;
 import com.fastasyncworldedit.core.util.task.FaweForkJoinWorkerThreadFactory;
+import com.fastasyncworldedit.core.util.task.GlobalTask;
+import com.fastasyncworldedit.core.util.task.RegionCall;
+import com.fastasyncworldedit.core.util.task.RegionTask;
+import com.fastasyncworldedit.core.util.task.RegionTicket;
 import com.fastasyncworldedit.core.wrappers.WorldWrapper;
 import com.google.common.util.concurrent.Futures;
 import com.sk89q.worldedit.world.World;
@@ -26,6 +34,7 @@ import java.util.Iterator;
 import java.util.Map;
 import java.util.Queue;
 import java.util.concurrent.Callable;
+import java.util.concurrent.CompletionStage;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
@@ -325,6 +334,46 @@ public abstract class QueueHandler implements Trimable, Runnable {
      */
     public <T> Future<T> syncWhenFree(Supplier<T> supplier) {
         return sync(supplier, syncWhenFree);
+    }
+
+    // Folia port: context-carrying sync additions (architecture v3 §3.5). New overloads only;
+    // the ten public descriptors above are preserved verbatim. Internal callers migrate to these
+    // by compile-error-driven migration. syncOn never blocks a tick thread.
+
+    /**
+     * Run a call on the context owning the target chunk, under a fresh {@link RegionTicket}.
+     *
+     * @since TODO
+     */
+    protected <T> CompletionStage<T> syncOn(ChunkTarget target, RegionCall<T> call) {
+        throw new UnsupportedOperationException("wave 1");
+    }
+
+    /**
+     * Run a task on the context owning the target chunk, under a fresh {@link RegionTicket}.
+     *
+     * @since TODO
+     */
+    protected CompletionStage<Void> syncOn(ChunkTarget target, RegionTask task) {
+        throw new UnsupportedOperationException("wave 1");
+    }
+
+    /**
+     * Run a task on the context owning the target entity, under a fresh {@link EntityTicket}.
+     *
+     * @since TODO
+     */
+    protected CompletionStage<Void> syncOn(EntityTarget target, EntityTask task) {
+        throw new UnsupportedOperationException("wave 1");
+    }
+
+    /**
+     * Run a task on the global-region context (config, cross-cutting lifecycle only).
+     *
+     * @since TODO
+     */
+    protected CompletionStage<Void> syncOnGlobal(GlobalTask task) {
+        throw new UnsupportedOperationException("wave 1");
     }
 
     private <T> Future<T> sync(Runnable run, T value, Queue<FutureTask> queue) {
