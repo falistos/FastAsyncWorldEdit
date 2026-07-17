@@ -78,6 +78,13 @@ val adaptersReobf = configurations.create("adaptersReobf") {
     }
 }
 
+val foliaBackend = configurations.create("foliaBackend") {
+    description = "Folia backend to include only in the Mojang/Paper JAR"
+    isCanBeConsumed = false
+    isCanBeResolved = true
+    shouldResolveConsistentlyWith(configurations["runtimeClasspath"])
+}
+
 allprojects {
     configurations.configureEach {
         resolutionStrategy {
@@ -120,6 +127,7 @@ dependencies {
             "adaptersReobf"(project(it.path))
         }
     }
+    "foliaBackend"(project(":worldedit-bukkit:folia"))
     compileOnly(libs.worldguard) {
         exclude("com.sk89q.worldedit", "worldedit-bukkit")
         exclude("com.sk89q.worldedit", "worldedit-core")
@@ -199,6 +207,16 @@ tasks.register<ShadowJar>("reobfShadowJar") {
 tasks.named<ShadowJar>("shadowJar") {
     archiveFileName.set("${rootProject.name}-Paper-${project.version}.${archiveExtension.getOrElse("jar")}")
     configurations.add(adapters)
+    // Architecture v3.1 §2: the Java-25 backend is bundled only in the Mojang/Paper artifact.
+    // reobfShadowJar intentionally does not resolve this configuration, keeping Spigot clean.
+    configurations.add(foliaBackend)
+    dependencies {
+        include(project(":worldedit-bukkit:folia"))
+    }
+    minimize {
+        // The backend is reached only after reflective Folia detection, so it has no static root.
+        exclude(project(":worldedit-bukkit:folia"))
+    }
     manifest {
         attributes(
             "paperweight-mappings-namespace" to "mojang",
