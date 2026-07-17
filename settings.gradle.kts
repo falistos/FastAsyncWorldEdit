@@ -59,6 +59,9 @@ listOf("1_21", "1_21_4", "1_21_5", "1_21_6", "1_21_9", "1_21_11", "26.1", "26.2"
     include("worldedit-bukkit:adapters:adapter-$it")
 }
 
+// Folia port: dedicated Java-25 backend module (architecture v3 §2).
+include("worldedit-bukkit:folia")
+
 listOf("bukkit", "core", "cli").forEach {
     include("worldedit-libs:$it")
     include("worldedit-$it")

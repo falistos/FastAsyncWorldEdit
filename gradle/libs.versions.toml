@@ -1,6 +1,8 @@
 [versions]
 # Minecraft expectations
 paperApi = "1.21.1-R0.1-SNAPSHOT"
+# Folia port: pinned, not a dynamic range (spec §2b) - verified coordinate for the SS2 prod stack.
+foliaApi = "26.1.2.build.8-stable"
 fastutil = "8.5.15"
 guava = "33.3.1-jre"
 log4j = "2.17.1"
@@ -71,6 +73,7 @@ paperweight = { group = "io.papermc.paperweight.userdev", name = "io.papermc.pap
 
 # Minecraft expectations
 paperApi = { group = "io.papermc.paper", name = "paper-api", version.ref = "paperApi" }
+foliaApi = { group = "dev.folia", name = "folia-api", version.ref = "foliaApi" }
 fastutil = { group = "it.unimi.dsi", name = "fastutil", version.ref = "fastutil" }
 log4j-bom = { group = "org.apache.logging.log4j", name = "log4j-bom", version.ref = "log4j" }
 log4j-api = { group = "org.apache.logging.log4j", name = "log4j-api", version.ref = "log4j" }
