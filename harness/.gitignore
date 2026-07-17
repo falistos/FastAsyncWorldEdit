@@ -1,0 +1,11 @@
+# Pre-staged server jars and other local cache entries.
+.cache/
+
+# Provisioned servers, worlds, generated configs, and console FIFOs.
+servers/
+
+# Captured server logs.
+logs/
+
+# Harness probe compilation output (sources are committed).
+probe/build/

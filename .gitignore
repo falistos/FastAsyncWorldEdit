@@ -36,3 +36,12 @@ worldedit-core/src/main/resources/lang/*
 .DS_Store
 ### Run server ignore
 run-*
+
+### Folia port: harness runtime artifacts & orchestration session logs
+harness/.cache/
+harness/servers/
+harness/lib/*.jar
+.codex/
+# Upstream ignores *.sh globally; harness scripts are versioned.
+!harness/*.sh
+!harness/**/*.sh

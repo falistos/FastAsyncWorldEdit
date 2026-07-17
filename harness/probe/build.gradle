@@ -1,0 +1,39 @@
+plugins {
+    id 'java'
+    id 'io.papermc.paperweight.userdev' version '2.0.0-beta.21'
+}
+
+group = 'com.fastasyncworldedit.harness'
+version = '0.2.0'
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(25)
+    }
+}
+
+configurations {
+    embedded
+    compileClasspath.extendsFrom(embedded)
+}
+
+dependencies {
+    paperweight.foliaDevBundle('26.1.2.build.8-stable')
+    embedded('io.papermc:paperlib:1.0.8')
+}
+
+paperweight.reobfArtifactConfiguration =
+        io.papermc.paperweight.userdev.ReobfArtifactConfiguration.getMOJANG_PRODUCTION()
+
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = 'UTF-8'
+    options.release = 25
+}
+
+tasks.named('jar') {
+    archiveBaseName = 'FAWEHarnessProbe'
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+    from {
+        configurations.embedded.collect { it.isDirectory() ? it : zipTree(it) }
+    }
+}

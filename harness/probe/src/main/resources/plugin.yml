@@ -1,0 +1,10 @@
+name: FAWEHarnessProbe
+version: 0.2.0
+main: com.fastasyncworldedit.harness.FoliaHarnessProbe
+api-version: '1.21'
+folia-supported: true
+load: STARTUP
+commands:
+  fawe-harness:
+    description: Run the Folia pipeline spike experiments
+    usage: /fawe-harness <fill-verify|environment|safety|verify-readback|tournament|perf-mark|perf-run|perf-queue|hazard-packet|hazard-neighbor|lighting|scratch-world>
