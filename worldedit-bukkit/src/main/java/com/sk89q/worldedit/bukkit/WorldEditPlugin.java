@@ -21,6 +21,8 @@ package com.sk89q.worldedit.bukkit;
 
 import com.fastasyncworldedit.bukkit.BukkitPermissionAttachmentManager;
 import com.fastasyncworldedit.bukkit.FaweBukkit;
+import com.fastasyncworldedit.bukkit.folia.FoliaSupport;
+import com.fastasyncworldedit.bukkit.folia.UnsupportedFoliaVersionException;
 import com.fastasyncworldedit.core.Fawe;
 import com.fastasyncworldedit.core.util.UpdateNotification;
 import com.fastasyncworldedit.core.util.WEManager;
@@ -123,6 +125,17 @@ public class WorldEditPlugin extends JavaPlugin {
 
     @Override
     public void onLoad() {
+
+        //FAWE start - Folia port: detection precedes Paper detection, fail-closed before any
+        // listener/executor/world access (spec §2, §2b); must be the very first thing on load.
+        if (FoliaSupport.isFolia()) {
+            try {
+                FoliaSupport.checkCertifiedOrFail();
+            } catch (UnsupportedFoliaVersionException e) {
+                throw new IllegalStateException(e.getMessage(), e);
+            }
+        }
+        //FAWE end
 
         //FAWE start
         // This is already covered by Spigot, however, a more pesky warning with a proper explanation over "Ambiguous plugin name..." can't hurt.
