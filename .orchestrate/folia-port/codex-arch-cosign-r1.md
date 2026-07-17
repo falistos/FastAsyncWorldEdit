@@ -1,0 +1,99 @@
+Verdict: REJECT. Architecture v2 is not yet a buildable or complete wave-1 contract. The detached-prepare/owner-commit direction is supported by W0.2, but several frozen signatures cannot implement the required ownership, liveness, partial-failure, and compatibility semantics.
+
+1. [BLOCKING] — Core/platform SPI placement cannot compile — `worldedit-core` cannot resolve downstream Bukkit/Folia implementations named by the sealed `permits` clauses, and unnamed-module sealed implementations must share a package. The same dependency inversion affects core `QueueHandler` signatures that refer to `RegionKey`, `RegionCall`, and `RegionTask` owned by the Bukkit dispatcher. Core is compiled at Java 21 with a JDK 25 toolchain, so sealed interfaces are language-level legal; placement, not language level, is the defect. Evidence: [architecture.md:170](/Users/falistos/Workspace/forks/FastAsyncWorldEdit/.orchestrate/folia-port/architecture.md:170), [architecture.md:211](/Users/falistos/Workspace/forks/FastAsyncWorldEdit/.orchestrate/folia-port/architecture.md:211), [architecture.md:395](/Users/falistos/Workspace/forks/FastAsyncWorldEdit/.orchestrate/folia-port/architecture.md:395), [buildlogic.common-java.gradle.kts:18](/Users/falistos/Workspace/forks/FastAsyncWorldEdit/build-logic/src/main/kotlin/buildlogic.common-java.gradle.kts:18), [buildlogic.common.gradle.kts:14](/Users/falistos/Workspace/forks/FastAsyncWorldEdit/build-logic/src/main/kotlin/buildlogic.common.gradle.kts:14).
+
+   Concrete downstream failure: core compilation either acquires an illegal reverse dependency on Bukkit or cannot resolve its permitted subclasses. Making ticket implementations public to work around this would make the alleged non-forgeable capability constructible outside the dispatcher.
+
+   Proposed amendment:
+
+   > `worldedit-core` MUST NOT reference a type declared by `worldedit-bukkit`, an adapter, or the Folia backend. `FaweThreadContext`, owner-target callback types, and dispatch targets are core-owned. `RegionTicket` is a core-owned final capability issued through an injected, non-public ticket authority; platform modules do not implement or construct it directly. `[W0-FREEZE]` requires a successful compile of the declared module graph.
+
+2. [BLOCKING] — `syncOn(RegionKey, …)` is neither schedulable nor API-compatible — `RegionKey` is explicitly only a stale grouping hint and contains no chunk anchor, while Folia scheduling requires a world and coordinates or an entity. The frozen public examples also change the existing `Future` return descriptors and omit eight of QueueHandler’s ten public methods. Evidence: [architecture.md:288](/Users/falistos/Workspace/forks/FastAsyncWorldEdit/.orchestrate/folia-port/architecture.md:288), [architecture.md:397](/Users/falistos/Workspace/forks/FastAsyncWorldEdit/.orchestrate/folia-port/architecture.md:397), [QueueHandler.java:203](/Users/falistos/Workspace/forks/FastAsyncWorldEdit/worldedit-core/src/main/java/com/fastasyncworldedit/core/queue/implementation/QueueHandler.java:203), [QueueHandler.java:249](/Users/falistos/Workspace/forks/FastAsyncWorldEdit/worldedit-core/src/main/java/com/fastasyncworldedit/core/queue/implementation/QueueHandler.java:249).
+
+   Concrete downstream failure: internal code cannot route `syncOn` to a current owner, and third-party binaries compiled against the existing `Future` methods fail linkage.
+
+   Proposed amendment:
+
+   > `RegionKey` MUST NOT appear in a core or public scheduling signature. It remains internal detached lane metadata. The internal target is a core `ChunkTarget(World,int,int)` or `EntityTarget(Entity)`, and every internal asynchronous overload returns `CompletionStage`, including the Runnable form. The existing `async` ×3, `sync` ×3, and `syncWhenFree` ×4 descriptors at `QueueHandler.java:203-327` remain unchanged for binary/source compatibility.
+
+3. [BLOCKING] — One `RegionTicket` cannot span the declared finalizer chain — the architecture says all ten steps execute under the same dynamically scoped ticket, but entity work, cross-region neighbors, and relight necessarily dispatch asynchronously. Waiting preserves the ticket but violates §1b; returning preserves liveness but retires the ticket; passing it onward creates a ticket leak. The merged design dropped Proposal B’s explicit yield/resume behavior. Evidence: [architecture.md:218](/Users/falistos/Workspace/forks/FastAsyncWorldEdit/.orchestrate/folia-port/architecture.md:218), [architecture.md:422](/Users/falistos/Workspace/forks/FastAsyncWorldEdit/.orchestrate/folia-port/architecture.md:422), [proposal-B-throughput.md:688](/Users/falistos/Workspace/forks/FastAsyncWorldEdit/.orchestrate/folia-port/spikes/tournament/proposal-B-throughput.md:688).
+
+   Concrete downstream failure: cross-owner entity/neighbor work either blocks a region thread, uses a stale ticket, or advances light/history before prerequisites settle. `onEntity(Entity, RegionTask)` also supplies only a chunk-oriented ticket, not proof of ownership of the scheduled entity.
+
+   Proposed amendment:
+
+   > A ticket is valid only for the lexical dynamic extent of one dispatcher callback and is retired in the dispatcher’s `finally` block. No ticket may be stored in a field, detached plan, future, callback result, or finalizer. Every cross-owner phase records a detached receipt, yields without waiting, and resumes through the appropriate dispatcher with a fresh target-specific capability. Entity work uses an entity-bound capability or an equivalent exact entity assertion at execution time.
+
+4. [BLOCKING] — The simplified permit SPI permits admission cycles and cannot realize R4 — Proposal B’s `Demand`, cancellation signal, stage transitions, byte accounting, and previously-accepted state were removed, while its multi-resource behavior was retained in prose. The remaining `acquire(RegionKey, Duration)` cannot account for prepared bytes, finalizer capacity, priority, cancellation, or stage transfer. After a region merge, permits retained under old keys can also exceed the actual region’s limit. Evidence: [architecture.md:321](/Users/falistos/Workspace/forks/FastAsyncWorldEdit/.orchestrate/folia-port/architecture.md:321), [architecture.md:356](/Users/falistos/Workspace/forks/FastAsyncWorldEdit/.orchestrate/folia-port/architecture.md:356), [architecture.md:508](/Users/falistos/Workspace/forks/FastAsyncWorldEdit/.orchestrate/folia-port/architecture.md:508), [proposal-B-throughput.md:295](/Users/falistos/Workspace/forks/FastAsyncWorldEdit/.orchestrate/folia-port/spikes/tournament/proposal-B-throughput.md:295).
+
+   Concrete downstream failure: A→B and B→A finalizers can occupy all commit/finalizer capacity while waiting for continuations that need that same capacity. Region merges can bypass the intended per-current-region bound.
+
+   Proposed amendment:
+
+   > Admission MUST carry operation ID, resource demand, deadline, cancellation, acceptance state, and lifecycle stage. Owner-thread admission has an immediate nonblocking `tryAcquire`; it never awaits a future. Continuations required to release existing work use reserved continuation capacity and never queue behind the commits they unblock. Before mutation, every stale permit is transferred to the actual current region’s accounting; failure to transfer defers or fails before mutation.
+
+5. [BLOCKING] — `OperationCompletion` cannot represent exactly-once partial execution — the two outcome records contain neither an applied receipt nor the six-state terminal classification. `pending` has no admission-registration/closure protocol, and `record()` decrements for duplicate callbacks. A streaming operation can therefore complete before admission closes, or a duplicate can drive it to zero early. A partially committed chunk cannot be reconstructed from `CommitFailed(chunkKey,cause)`. Evidence: [architecture.md:462](/Users/falistos/Workspace/forks/FastAsyncWorldEdit/.orchestrate/folia-port/architecture.md:462), [architecture.md:487](/Users/falistos/Workspace/forks/FastAsyncWorldEdit/.orchestrate/folia-port/architecture.md:487), [proposal-B-throughput.md:798](/Users/falistos/Workspace/forks/FastAsyncWorldEdit/.orchestrate/folia-port/spikes/tournament/proposal-B-throughput.md:798), [spec.md:116](/Users/falistos/Workspace/forks/FastAsyncWorldEdit/.orchestrate/folia-port/spec.md:116).
+
+   Concrete downstream failure: a partial section/tile/entity commit is omitted from undo or treated as a whole committed chunk; actor/API completion may occur before accepted work or persisted history settles.
+
+   Proposed amendment:
+
+   > Every accepted chunk registers exactly once before scheduling. Its terminal record is keyed by `(operationId, chunkKey, ticketSequence)` and contains `TerminalStatus`, an exact `AppliedReceipt`, and an optional failure. Duplicate terminal records are ignored without decrementing. Admission closes explicitly. The operation completes only when admission is closed, every registered chunk is terminal, every required finalizer has settled, and every APPLIED record has reached its configured persistence boundary.
+
+6. [BLOCKING] — `ChunkVersion` does not prevent stale whole-section replacement — it is incremented only by this pipeline. It cannot detect vanilla, player, or third-party mutation between snapshot capture and commit, nor an unload/reload epoch reset. Removing the old CAS because region callbacks are serialized removes concurrent execution, but does not establish that the prepared base is still current. W0.2 did not exercise overlapping external mutation. Evidence: [architecture.md:428](/Users/falistos/Workspace/forks/FastAsyncWorldEdit/.orchestrate/folia-port/architecture.md:428), [architecture.md:536](/Users/falistos/Workspace/forks/FastAsyncWorldEdit/.orchestrate/folia-port/architecture.md:536), [w02-pipeline-results.md:237](/Users/falistos/Workspace/forks/FastAsyncWorldEdit/.orchestrate/folia-port/spikes/w02-pipeline-results.md:237).
+
+   Concrete downstream failure: a prepared complete section can silently overwrite a newer unrelated live edit while its FAWE version still matches.
+
+   Proposed amendment:
+
+   > Every snapshot carries a world-instance/load epoch, FAWE mutation sequence, and fingerprints or identities for every live base component replaced. The owner validates all stamps before the first mutation. A mismatch performs no mutation and triggers a bounded recapture/reprepare or an explicit `FAILED_BEFORE_MUTATION`. Region rebind never waives this validation. Region-thread serialization replaces the send lock, not stale-base validation.
+
+7. [BLOCKING] — G-A1 owner-inline bypasses prerequisites — the path performs prepare and commit on the tick thread, yet acceptance requires durable PREPARED history, a permit, and ordering behind prior same-chunk tickets. It can also move pattern/mask/custom-extent callbacks onto a tick thread contrary to the w06 callback contract. Evidence: [architecture.md:58](/Users/falistos/Workspace/forks/FastAsyncWorldEdit/.orchestrate/folia-port/architecture.md:58), [architecture.md:559](/Users/falistos/Workspace/forks/FastAsyncWorldEdit/.orchestrate/folia-port/architecture.md:559), [architecture.md:530](/Users/falistos/Workspace/forks/FastAsyncWorldEdit/.orchestrate/folia-port/architecture.md:530), [w06-api-context-audit.md:115](/Users/falistos/Workspace/forks/FastAsyncWorldEdit/.orchestrate/folia-port/spikes/w06-api-context-audit.md:115).
+
+   Concrete downstream failure: an inline edit can overtake an older accepted commit, block the owner on permit/history I/O, or execute unbounded consumer code during a region tick.
+
+   Proposed amendment:
+
+   > G-A1 is eligible only when: the same-chunk sequencer proves no predecessor; an owner-only permit is acquired immediately without waiting; the required PREPARED boundary is already satisfied without tick-thread I/O; and preparation is framework-owned, callback-free, and bounded. Otherwise the operation enters the normal detached lane before any side effect. Pattern, mask, transform, custom-extent, persistence, and arbitrary plugin callbacks never execute through G-A1.
+
+8. [BLOCKING] — Relight and callback ordering contradict §4d and Amendment A1 — fixed step 10 completes the chunk after relight submission, not after detached NMSRelighter output is materialized. The default order also places packet resend before relight submission, despite delayed packet sending being the stated throughput fallback. A1.4 additionally requires re-dispatch before touching FAWE shared state; ticket typing only prevents ticketed live-state calls. Evidence: [architecture.md:447](/Users/falistos/Workspace/forks/FastAsyncWorldEdit/.orchestrate/folia-port/architecture.md:447), [architecture.md:455](/Users/falistos/Workspace/forks/FastAsyncWorldEdit/.orchestrate/folia-port/architecture.md:455), [amendment-1-draft.md:16](/Users/falistos/Workspace/forks/FastAsyncWorldEdit/.orchestrate/folia-port/amendment-1-draft.md:16), [amendment-1-draft.md:36](/Users/falistos/Workspace/forks/FastAsyncWorldEdit/.orchestrate/folia-port/amendment-1-draft.md:36).
+
+   Concrete downstream failure: success can be reported before required light or packet finalization, and a hostile callback can mutate completion/history/backpressure state directly even though it has no ticket.
+
+   Proposed amendment:
+
+   > The terminal phase order is: live commit phases → required neighbor settlement → optional G-A3 early packet → detached NMSRelighter computation → fresh owner re-dispatch and light materialization → required packet send/enqueue → APPLIED persistence boundary → chunk terminal record. Relight submission is never a terminal point. External callbacks may capture detached results only; before touching live state or FAWE shared operation state they re-dispatch to the owning coordinator context.
+
+   The claimed cross-region neighbor-order weakening must also be either certified or added to a signed amendment and to `INV-DEG-006`; it cannot be introduced only by architecture prose. [w07-compat-inventory.md:233](/Users/falistos/Workspace/forks/FastAsyncWorldEdit/.orchestrate/folia-port/spikes/w07-compat-inventory.md:233)
+
+9. [BLOCKING] — The §4c freeze still omits its declared API gaps — w06 explicitly excludes QueueHandler’s ten methods, 255 declarations across 24 concrete Extent types, and four UUID-executor methods on `Fawe`. Architecture acknowledges only the QueueHandler family in prose and does not close any of the three gaps. Evidence: [w06-api-context-audit.md:14](/Users/falistos/Workspace/forks/FastAsyncWorldEdit/.orchestrate/folia-port/spikes/w06-api-context-audit.md:14), [w06-api-context-audit.md:224](/Users/falistos/Workspace/forks/FastAsyncWorldEdit/.orchestrate/folia-port/spikes/w06-api-context-audit.md:224), [Fawe.java:475](/Users/falistos/Workspace/forks/FastAsyncWorldEdit/worldedit-core/src/main/java/com/fastasyncworldedit/core/Fawe.java:475).
+
+   Concrete downstream failure: wave-1 workers have no binding caller-context, completion, cancellation, or error contract for those public methods, so spec §4c remains unfrozen.
+
+   Proposed amendment:
+
+   > `[W0-FREEZE]` is not effective until the APIC artifact includes the ten exact QueueHandler descriptors, every implementation-specific public declaration across the 24 concrete Extent types, and `Fawe.getClipboardExecutor` plus all three `submitUUIDKeyQueuedTask` overloads. An inherited override may reference an existing APIC row explicitly; every additional public method receives its own supported/internal classification.
+
+10. [BLOCKING] — The §8 seams and budgets are not freeze-ready — `TaskKind` is not accepted by any dispatcher method, `FoliaBackpressure` exposes only two counts, and no frozen lifecycle API can stop admission, drain, or report unresolved tickets. W08 states that no number is currently producible and all thresholds remain empty. Evidence: [architecture.md:276](/Users/falistos/Workspace/forks/FastAsyncWorldEdit/.orchestrate/folia-port/architecture.md:276), [architecture.md:350](/Users/falistos/Workspace/forks/FastAsyncWorldEdit/.orchestrate/folia-port/architecture.md:350), [w08-perf-budgets.md:133](/Users/falistos/Workspace/forks/FastAsyncWorldEdit/.orchestrate/folia-port/spikes/w08-perf-budgets.md:133), [w08-perf-budgets.md:200](/Users/falistos/Workspace/forks/FastAsyncWorldEdit/.orchestrate/folia-port/spikes/w08-perf-budgets.md:200), [spec.md:190](/Users/falistos/Workspace/forks/FastAsyncWorldEdit/.orchestrate/folia-port/spec.md:190).
+
+   Concrete downstream failure: G1, G3, G4, and G6 cannot be sourced from the named seams; G2/G5/G8 have no harness implementation; G7 lacks a staged runtime. Wave 1 would begin without the numeric budgets spec §8 requires to be frozen first.
+
+   Proposed amendment:
+
+   > Assign one producer to every G1–G8 signal before freeze: operation-terminal timing at `OperationCompletion`; explicit task/phase labels and per-region schedule/slice/phase timers in dispatcher/broker; per-region and global pressure snapshots containing ready counts/bytes, waiters, finalizers, packet bytes, scheduled drains, tickets, futures, rebinds, and oldest age; and lifecycle `stopAccepting`, bounded `drain`, and unresolved-count reporting. Implement the harness extensions and populate every numeric slot before wave 1 dispatch.
+
+11. [MAJOR] — The synthesis provenance overstates fidelity — R4 says B’s behavior was merged after removing the data and stage model that defines it; R5 says all location-free overloads were preserved although the frozen block changes/omits them; R6 says B’s taxonomy feeds C’s sink although the sink cannot carry a partial receipt. The G-A1 reconciliation also says C’s `onRegion` “already” runs inline, but Proposal C’s dispatcher contract contains no such guarantee. Evidence: [judgment.md:103](/Users/falistos/Workspace/forks/FastAsyncWorldEdit/.orchestrate/folia-port/spikes/tournament/judgment.md:103), [judgment.md:119](/Users/falistos/Workspace/forks/FastAsyncWorldEdit/.orchestrate/folia-port/spikes/tournament/judgment.md:119), [judgment.md:134](/Users/falistos/Workspace/forks/FastAsyncWorldEdit/.orchestrate/folia-port/spikes/tournament/judgment.md:134), [proposal-C-safety.md:130](/Users/falistos/Workspace/forks/FastAsyncWorldEdit/.orchestrate/folia-port/spikes/tournament/proposal-C-safety.md:130).
+
+   Concrete downstream failure: implementation tasks will treat adaptations as inherited guarantees and omit the missing behavior.
+
+   Proposed amendment:
+
+   > Replace each “verbatim” claim with an explicit semantic diff. R4 records the lost cancellation/stage/resource fields; R5 enumerates all preserved descriptors and the new core-owned targets; R6 defines how every terminal status and applied receipt enters the sink; G-A1 adds an explicit inline execution guarantee and eligibility conditions. Re-run the reconciliation check after the signatures are replaced.
+
+The module-layout item must be resolved in the same revision. The current architecture prescribes Folia API dependencies in existing Java-21-output modules, while the project board records the JVM-25 metadata conflict and requires a dedicated-module decision. [architecture.md:114](/Users/falistos/Workspace/forks/FastAsyncWorldEdit/.orchestrate/folia-port/architecture.md:114), [plan.md:71](/Users/falistos/Workspace/forks/FastAsyncWorldEdit/.orchestrate/folia-port/plan.md:71)
+
+Recommended resolution:
+
+> Add a dedicated `:worldedit-bukkit:folia` Java-25 module. `folia-api` is compile-only there. Its output is bundled only into the Mojang Paper artifact and is loaded only after reflective Folia detection; the reobfuscated Spigot artifact excludes it. `worldedit-core` remains Java-21 output and has no Folia dependency.
+
+Verdict: REJECT. Wave 1 remains gated pending architecture v3, completed companion freezes, a compile proof, and another adversarial co-signature round.
