@@ -82,9 +82,12 @@ import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
+import java.util.concurrent.CompletionStage;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Future;
 import java.util.concurrent.Semaphore;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.ReadWriteLock;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 import java.util.function.Function;
@@ -96,6 +99,7 @@ import static net.minecraft.core.registries.Registries.BIOME;
 public class PaperweightGetBlocks extends AbstractBukkitGetBlocks<ServerLevel, LevelChunk> {
 
     private static final Logger LOGGER = LogManagerCompat.getLogger();
+    private static final long OWNER_WAIT_SECONDS = 60L;
 
     private static final Function<BlockPos, BlockVector3> posNms2We = v -> BlockVector3.at(v.getX(), v.getY(), v.getZ());
     public static final Function<BlockEntity, FaweCompoundTag> NMS_TO_TILE = ((PaperweightFaweAdapter) WorldEditPlugin
@@ -377,6 +381,8 @@ public class PaperweightGetBlocks extends AbstractBukkitGetBlocks<ServerLevel, L
             }
         }
         final BiomeType[][] biomes = set.getBiomes();
+        List<CompletionStage<Void>> sectionUpdates = new ArrayList<>();
+        var targetWorld = BukkitAdapter.adapt(nmsWorld.getWorld());
 
         int bitMask = 0;
         synchronized (nmsChunk) {
@@ -415,25 +421,29 @@ public class PaperweightGetBlocks extends AbstractBukkitGetBlocks<ServerLevel, L
                                         serverLevel.palettedContainerFactory().blockStatesStrategy(),
                                         biomeData
                                 );
-                                if (PaperweightPlatformAdapter.setSectionAtomic(
-                                        nmsWorld.getWorld().getName(),
+                                sectionUpdates.add(PaperweightPlatformAdapter.setSectionAtomic(
+                                        targetWorld,
                                         chunkPos,
                                         levelChunkSections,
                                         null,
                                         newSection,
                                         getSectionIndex
-                                )) {
-                                    updateGet(nmsChunk, levelChunkSections, newSection, new char[4096], getSectionIndex);
-                                    continue;
-                                } else {
-                                    existingSection = levelChunkSections[getSectionIndex];
-                                    if (existingSection == null) {
+                                ).thenAccept(swapped -> {
+                                    if (swapped) {
+                                        updateGet(
+                                                nmsChunk,
+                                                levelChunkSections,
+                                                newSection,
+                                                new char[4096],
+                                                getSectionIndex
+                                        );
+                                    } else {
                                         LOGGER.error("Skipping invalid null section. chunk: {}, {} layer: {}", chunkX, chunkZ,
                                                 getSectionIndex
                                         );
-                                        continue;
                                     }
-                                }
+                                }));
+                                continue;
                             } else {
                                 PalettedContainer<Holder<Biome>> paletteBiomes = setBiomesToPalettedContainer(
                                         biomes,
@@ -491,25 +501,23 @@ public class PaperweightGetBlocks extends AbstractBukkitGetBlocks<ServerLevel, L
                                 serverLevel.palettedContainerFactory().blockStatesStrategy(),
                                 biomeData
                         );
-                        if (PaperweightPlatformAdapter.setSectionAtomic(
-                                nmsWorld.getWorld().getName(),
+                        sectionUpdates.add(PaperweightPlatformAdapter.setSectionAtomic(
+                                targetWorld,
                                 chunkPos,
                                 levelChunkSections,
                                 null,
                                 newSection,
                                 getSectionIndex
-                        )) {
-                            updateGet(nmsChunk, levelChunkSections, newSection, setArr, getSectionIndex);
-                            continue;
-                        } else {
-                            existingSection = levelChunkSections[getSectionIndex];
-                            if (existingSection == null) {
+                        ).thenAccept(swapped -> {
+                            if (swapped) {
+                                updateGet(nmsChunk, levelChunkSections, newSection, setArr, getSectionIndex);
+                            } else {
                                 LOGGER.error("Skipping invalid null section. chunk: {}, {} layer: {}", chunkX, chunkZ,
                                         getSectionIndex
                                 );
-                                continue;
                             }
-                        }
+                        }));
+                        continue;
                     }
 
                     //ensure that the server doesn't try to tick the chunksection while we're editing it. (Again)
@@ -556,20 +564,22 @@ public class PaperweightGetBlocks extends AbstractBukkitGetBlocks<ServerLevel, L
                                 serverLevel.palettedContainerFactory().blockStatesStrategy(),
                                 biomeData != null ? biomeData : (PalettedContainer<Holder<Biome>>) existingSection.getBiomes()
                         );
-                        if (!PaperweightPlatformAdapter.setSectionAtomic(
-                                nmsWorld.getWorld().getName(),
+                        sectionUpdates.add(PaperweightPlatformAdapter.setSectionAtomic(
+                                targetWorld,
                                 chunkPos,
                                 levelChunkSections,
                                 existingSection,
                                 newSection,
                                 getSectionIndex
-                        )) {
-                            LOGGER.error("Skipping invalid null section. chunk: {}, {} layer: {}", chunkX, chunkZ,
-                                    getSectionIndex
-                            );
-                        } else {
-                            updateGet(nmsChunk, levelChunkSections, newSection, setArr, getSectionIndex);
-                        }
+                        ).thenAccept(swapped -> {
+                            if (swapped) {
+                                updateGet(nmsChunk, levelChunkSections, newSection, setArr, getSectionIndex);
+                            } else {
+                                LOGGER.error("Skipping invalid null section. chunk: {}, {} layer: {}", chunkX, chunkZ,
+                                        getSectionIndex
+                                );
+                            }
+                        }));
                     }
                 }
             }
@@ -763,8 +773,39 @@ public class PaperweightGetBlocks extends AbstractBukkitGetBlocks<ServerLevel, L
                     }
                 };
             }
+            return handleCallFinalizerAfterSections(sectionUpdates, syncTasks, callback, finalizer);
+        }
+    }
+
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    private <T extends Future<T>> T handleCallFinalizerAfterSections(
+            List<CompletionStage<Void>> sectionUpdates,
+            List<Runnable> syncTasks,
+            Runnable callback,
+            Runnable finalizer
+    ) throws Exception {
+        if (sectionUpdates.isEmpty()) {
             return handleCallFinalizer(syncTasks, callback, finalizer);
         }
+        CompletableFuture<?>[] futures = sectionUpdates.stream()
+                .map(CompletionStage::toCompletableFuture)
+                .toArray(CompletableFuture[]::new);
+        CompletableFuture<Void> allSections = CompletableFuture.allOf(futures)
+                .orTimeout(OWNER_WAIT_SECONDS, TimeUnit.SECONDS);
+        allSections.whenComplete((ignored, failure) -> {
+            if (failure != null) {
+                for (CompletableFuture<?> future : futures) {
+                    future.cancel(false);
+                }
+            }
+        });
+        return (T) (Future) allSections.thenApply(ignored -> {
+            try {
+                return handleCallFinalizer(syncTasks, callback, finalizer);
+            } catch (Exception failure) {
+                throw new CompletionException(failure);
+            }
+        });
     }
 
     private void updateGet(

@@ -18,11 +18,13 @@ import com.fastasyncworldedit.core.util.task.ChunkTarget;
 import com.fastasyncworldedit.core.util.task.EntityTarget;
 import com.fastasyncworldedit.core.util.task.EntityTask;
 import com.fastasyncworldedit.core.util.task.EntityTicket;
+import com.fastasyncworldedit.core.util.task.FaweThreadContext;
 import com.fastasyncworldedit.core.util.task.FaweForkJoinWorkerThreadFactory;
 import com.fastasyncworldedit.core.util.task.GlobalTask;
 import com.fastasyncworldedit.core.util.task.RegionCall;
 import com.fastasyncworldedit.core.util.task.RegionTask;
 import com.fastasyncworldedit.core.util.task.RegionTicket;
+import com.fastasyncworldedit.core.util.task.TicketAuthority;
 import com.fastasyncworldedit.core.wrappers.WorldWrapper;
 import com.google.common.util.concurrent.Futures;
 import com.sk89q.worldedit.world.World;
@@ -32,8 +34,10 @@ import java.lang.ref.WeakReference;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Queue;
 import java.util.concurrent.Callable;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.ExecutionException;
@@ -103,8 +107,15 @@ public abstract class QueueHandler implements Trimable, Runnable {
      */
     private long last;
     private long allocate = 50;
+    private final TicketAuthority ticketAuthority;
 
     protected QueueHandler() {
+        this(null);
+    }
+
+    /** Bootstrap injection point for the backend's sole ticket authority. */
+    protected QueueHandler(TicketAuthority ticketAuthority) {
+        this.ticketAuthority = ticketAuthority;
         TaskManager.taskManager().repeat(this, 1);
     }
 
@@ -113,9 +124,18 @@ public abstract class QueueHandler implements Trimable, Runnable {
         return blockingExecutor;
     }
 
+    /** Shuts down the three backend-owned prepare executors after platform drain completion. */
+    @ApiStatus.Internal
+    public final void shutdownExecutors() {
+        forkJoinPoolPrimary.shutdownNow();
+        forkJoinPoolSecondary.shutdownNow();
+        blockingExecutor.shutdownNow();
+    }
+
     @Override
     public void run() {
-        if (!Fawe.isMainThread()) {
+        // Folia port: the legacy location-free drain is a global-context responsibility.
+        if (!FaweThreadContext.current().isGlobalContext()) {
             throw new IllegalStateException("Not main thread");
         }
         if (!syncTasks.isEmpty()) {
@@ -343,41 +363,120 @@ public abstract class QueueHandler implements Trimable, Runnable {
     /**
      * Run a call on the context owning the target chunk, under a fresh {@link RegionTicket}.
      *
-     * @since TODO
      */
     protected <T> CompletionStage<T> syncOn(ChunkTarget target, RegionCall<T> call) {
-        throw new UnsupportedOperationException("wave 1");
+        requireLegacyLocationFreeLiveState();
+        ChunkTarget checkedTarget = Objects.requireNonNull(target, "target");
+        RegionCall<T> checkedCall = Objects.requireNonNull(call, "call");
+        TicketAuthority authority = ticketAuthority();
+        CompletableFuture<T> result = new CompletableFuture<>();
+        sync((Runnable) () -> {
+            if (result.isCancelled()) {
+                return;
+            }
+            RegionTicket ticket = null;
+            try {
+                ticket = authority.mintRegion(
+                        checkedTarget.world(),
+                        checkedTarget.chunkX(),
+                        checkedTarget.chunkZ()
+                );
+                result.complete(checkedCall.call(ticket));
+            } catch (Throwable failure) {
+                result.completeExceptionally(failure);
+            } finally {
+                if (ticket != null) {
+                    authority.retire(ticket);
+                }
+            }
+        });
+        return result;
     }
 
     /**
      * Run a task on the context owning the target chunk, under a fresh {@link RegionTicket}.
      *
-     * @since TODO
      */
     protected CompletionStage<Void> syncOn(ChunkTarget target, RegionTask task) {
-        throw new UnsupportedOperationException("wave 1");
+        return syncOn(target, ticket -> {
+            Objects.requireNonNull(task, "task").run(ticket);
+            return null;
+        });
     }
 
     /**
      * Run a task on the context owning the target entity, under a fresh {@link EntityTicket}.
      *
-     * @since TODO
      */
     protected CompletionStage<Void> syncOn(EntityTarget target, EntityTask task) {
-        throw new UnsupportedOperationException("wave 1");
+        requireLegacyLocationFreeLiveState();
+        EntityTarget checkedTarget = Objects.requireNonNull(target, "target");
+        EntityTask checkedTask = Objects.requireNonNull(task, "task");
+        TicketAuthority authority = ticketAuthority();
+        CompletableFuture<Void> result = new CompletableFuture<>();
+        sync((Runnable) () -> {
+            if (result.isCancelled()) {
+                return;
+            }
+            EntityTicket ticket = null;
+            try {
+                ticket = authority.mintEntity(checkedTarget.entity());
+                checkedTask.run(ticket);
+                result.complete(null);
+            } catch (Throwable failure) {
+                result.completeExceptionally(failure);
+            } finally {
+                if (ticket != null) {
+                    authority.retire(ticket);
+                }
+            }
+        });
+        return result;
     }
 
     /**
      * Run a task on the global-region context (config, cross-cutting lifecycle only).
      *
-     * @since TODO
      */
     protected CompletionStage<Void> syncOnGlobal(GlobalTask task) {
-        throw new UnsupportedOperationException("wave 1");
+        requireLegacyLocationFreeLiveState();
+        GlobalTask checkedTask = Objects.requireNonNull(task, "task");
+        CompletableFuture<Void> result = new CompletableFuture<>();
+        sync((Runnable) () -> {
+            if (result.isCancelled()) {
+                return;
+            }
+            try {
+                checkedTask.run();
+                result.complete(null);
+            } catch (Throwable failure) {
+                result.completeExceptionally(failure);
+            }
+        });
+        return result;
+    }
+
+    /** INTERNAL-NONAPI backend policy used only by {@link QueueHandlerRouting}. */
+    protected boolean permitsLegacyLocationFreeLiveState() {
+        return true;
+    }
+
+    private void requireLegacyLocationFreeLiveState() {
+        if (!permitsLegacyLocationFreeLiveState()) {
+            throw new IllegalStateException("Legacy location-free live-state routing is disabled");
+        }
+    }
+
+    private TicketAuthority ticketAuthority() {
+        if (ticketAuthority == null) {
+            throw new IllegalStateException("The backend ticket authority is not wired");
+        }
+        return ticketAuthority;
     }
 
     private <T> Future<T> sync(Runnable run, T value, Queue<FutureTask> queue) {
-        if (Fawe.isMainThread()) {
+        // Folia port: location-free sync executes inline from the caller's tick context.
+        if (FaweThreadContext.current().isTickThread()) {
             run.run();
             return Futures.immediateFuture(value);
         }
@@ -388,7 +487,8 @@ public abstract class QueueHandler implements Trimable, Runnable {
     }
 
     private <T> Future<T> sync(Runnable run, Queue<FutureTask> queue) {
-        if (Fawe.isMainThread()) {
+        // Folia port: location-free sync executes inline from the caller's tick context.
+        if (FaweThreadContext.current().isTickThread()) {
             run.run();
             return Futures.immediateCancelledFuture();
         }
@@ -399,7 +499,8 @@ public abstract class QueueHandler implements Trimable, Runnable {
     }
 
     private <T> Future<T> sync(Callable<T> call, Queue<FutureTask> queue) throws Exception {
-        if (Fawe.isMainThread()) {
+        // Folia port: location-free sync executes inline from the caller's tick context.
+        if (FaweThreadContext.current().isTickThread()) {
             return Futures.immediateFuture(call.call());
         }
         final FutureTask<T> result = new FutureTask<>(call);
@@ -409,7 +510,8 @@ public abstract class QueueHandler implements Trimable, Runnable {
     }
 
     private <T> Future<T> sync(Supplier<T> call, Queue<FutureTask> queue) {
-        if (Fawe.isMainThread()) {
+        // Folia port: location-free sync executes inline from the caller's tick context.
+        if (FaweThreadContext.current().isTickThread()) {
             return Futures.immediateFuture(call.get());
         }
         final FutureTask<T> result = new FutureTask<>(call::get);

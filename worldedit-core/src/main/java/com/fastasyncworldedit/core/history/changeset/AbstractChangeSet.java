@@ -11,6 +11,7 @@ import com.fastasyncworldedit.core.queue.IChunkGet;
 import com.fastasyncworldedit.core.queue.IChunkSet;
 import com.fastasyncworldedit.core.util.NbtUtils;
 import com.fastasyncworldedit.core.util.TaskManager;
+import com.fastasyncworldedit.core.util.task.FaweThreadContext;
 import com.google.common.util.concurrent.Futures;
 import com.sk89q.jnbt.CompoundTag;
 import com.sk89q.worldedit.EditSession;
@@ -412,7 +413,8 @@ public abstract class AbstractChangeSet implements ChangeSet, IBatchProcessor {
     }
 
     public Future<?> addWriteTask(Runnable writeTask) {
-        return addWriteTask(writeTask, Fawe.isMainThread());
+        // Folia port: keep detached history work inline from any tick context.
+        return addWriteTask(writeTask, FaweThreadContext.current().isTickThread());
     }
 
     public Future<?> addWriteTask(final Runnable writeTask, final boolean completeNow) {

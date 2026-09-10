@@ -31,6 +31,7 @@ import com.fastasyncworldedit.core.internal.command.MethodInjector;
 import com.fastasyncworldedit.core.internal.exception.FaweException;
 import com.fastasyncworldedit.core.util.StringMan;
 import com.fastasyncworldedit.core.util.TaskManager;
+import com.fastasyncworldedit.core.util.task.FaweThreadContext;
 import com.fastasyncworldedit.core.util.task.ThrowableSupplier;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
@@ -674,7 +675,11 @@ public final class PlatformCommandManager {
         Command cmd = optional.get();
         PermissionCondition queued = cmd.getCondition().as(PermissionCondition.class).orElse(null);
         if (queued != null && !queued.isQueued()) {
-            TaskManager.taskManager().taskNow(() -> handleCommandOnCurrentThread(event), Fawe.isMainThread());
+            // Folia port: move non-queued command work away from every server tick context.
+            TaskManager.taskManager().taskNow(
+                    () -> handleCommandOnCurrentThread(event),
+                    FaweThreadContext.current().isTickThread()
+            );
             return;
         } else {
             actor.decline();

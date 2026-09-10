@@ -55,6 +55,45 @@ content is **wave 2**; this task builds the structure wave 2 fills.
 - `RegionKey` (folia module): primary author here — define identity/equality (lane grouping,
   never region-ID as proof). Reconcile with task 13's minimal contract (single-writer per
   architecture §5; orchestrator sequences the two).
+  - **HARD PRECONDITION (promoted from a reconciliation note by the task-13 admission review,
+    2026-07-20 — orchestrator-adopted, do NOT treat as advisory).** `RegionKey` is currently an
+    empty class with identity equality, carrying only the comment "derived from live Folia
+    ownership at drain time". Task 13's entire accounting is keyed on it via a
+    `Map<RegionKey, RegionState>` with `regions.get(...)` / `regions.remove(key, value)`.
+    Therefore:
+    1. **Value equality is mandatory.** If this task mints a fresh `RegionKey` per drain, every
+       `regions.get()` misses, a new `RegionState` is created per attempt, and **every per-region
+       cap silently degenerates into a per-attempt cap** — the 256 ready chunks / 64 MiB prepared
+       / 64 finalizer chains / 256 waiters bounds stop existing while every counter still reads
+       healthy. That is the backpressure gate failing open, invisibly.
+    2. **It must be immutable, with a stable hash.** A mutable key makes
+       `regions.remove(key, state)` fail silently, so idle-region eviction never reclaims and the
+       region map grows without bound on a long-running server.
+    3. Two `RegionKey`s must compare equal exactly when they denote the same live region for
+       accounting purposes, and that must survive the merge/split rebind path (§3.7) — the very
+       events that make region identity change.
+    Deliver a test that a `RegionKey` re-derived for the same region equals the original and hits
+    the same `RegionState`. If any of the three cannot hold, STOP (NEEDS_CONTEXT): task 13's
+    accounting must then be re-keyed, which is an orchestrator decision, not a broker one.
+
+## HARD CONSTRAINT ON THE REJECTION HOOK (added 2026-07-20, from the task-13 re-review)
+
+**Do not wire the backpressure rejection hook to the `NOT_ACCEPTED` sink unconditionally.** The
+hook currently fires **indistinguishably** for a `cancel` outcome and a `reject` outcome. Wiring it
+to `NOT_ACCEPTED` — the obvious reading — would make a caller-initiated `//cancel` terminalize the
+plan *behind* the outcome CAS, **burning the plan sequence of a still-viable operation**. That is
+exactly what architecture ruling r14 Q1 forbids: `reject` terminalizes `NOT_ACCEPTED` and forces a
+new plan sequence, `cancel` deliberately does not.
+
+Required: the hook must distinguish the two outcomes before terminalizing anything, and only a
+`reject` outcome may reach `rejectAdmission(...)`. If the hook's current signature cannot carry
+that distinction, that is a coordination point with task 13 — STOP and escalate rather than
+guessing, because guessing here silently re-opens a defect the architecture spent a ruling closing.
+
+Related: `transfer` returns false both when the target is genuinely saturated **and** when its
+`tryLock` merely missed under contention. §3.7 rebinds on every drain, so lock contention becomes
+user-visible plan deferral. **Define the retry contract** — a refusal that means "busy, retry" must
+not be treated as "cannot admit, terminate without mutation".
 
 ## Out of scope
 - Concrete GET snapshot capture / SET section install / finalizer NMS content — that is wave 2
@@ -77,6 +116,10 @@ content is **wave 2**; this task builds the structure wave 2 fills.
   `FoliaBackpressure.java`.
 
 ## Signature / structural flags
+- **Wiring constraint from the task-13 cross-review (2026-07-17):** the backpressure
+  rejection hook (task-11 completion-sink wiring) executes inside the backpressure
+  completion-drain path — it must NEVER do blocking terminalization work directly; hand off
+  to the completion service (§3.6b) instead.
 - `DiagnosticSnapshot` **now exists in tree** (added by certification corrective C-F1F2,
   2026-07-17): frozen-shape record beside the broker in `FoliaCommitBroker.java`, plus
   `diagnostics(RegionKey)` / `diagnosticsGlobal()` skeleton methods on the broker. Implement
@@ -128,8 +171,118 @@ harness/scenario.sh perf-probe --version 26.1.2` and `... pipeline-probe --versi
 ---
 ## Dev record (worker fills this in on completion)
 
-- **Status:** <DONE | DONE_WITH_CONCERNS | BLOCKED>
+- **Status:** DONE_WITH_CONCERNS
 - **File List:**
+  - `worldedit-bukkit/folia/src/main/java/com/fastasyncworldedit/bukkit/folia/RegionKey.java:12`
+    — immutable `(worldId, observedRegionId)` value key with stable equality/hash/string form.
+  - `worldedit-bukkit/folia/src/main/java/com/fastasyncworldedit/bukkit/folia/FoliaCommitBroker.java:47`
+    — plan-producer registration, region lanes, adaptive slices, DRR, rebind/transfer,
+    target-lane sync seams, diagnostics, and rejection handoff.
+  - `worldedit-bukkit/folia/src/test/java/com/fastasyncworldedit/bukkit/folia/FoliaCommitBrokerTest.java:50`
+    — 14 deterministic broker tests.
+  - `worldedit-bukkit/folia/src/test/java/com/fastasyncworldedit/bukkit/folia/DefaultFoliaBackpressureTest.java:108`
+    — re-derived `RegionKey` accounting test.
+  - `.orchestrate/folia-port/tasks/14-commit-broker-lanes.md:172` — this record.
 - **Deviations:**
+  - Numeric slice slots remain injected through `SliceTuning` and retain the architecture's
+    initial `[NEEDS-RUNTIME]` values. No runtime freeze was made here.
+  - `RegionKey()` remains package-private solely for pre-existing task-13 synthetic fixtures;
+    production wiring must use `RegionKey(UUID, long)`.
+  - Per-region broker-owned diagnostic counts scan the live plan registry. The drain-expiry
+    terminalizer does not: it reads one prebuilt immutable `ChunkTerminalRecord` atomically.
+  - Gradle and runtime probes were not run, per the dispatch constraint. Java 25 `javac` compiled
+    the targeted sources/tests with `-Werror`; a full Folia-main `javac` pass succeeded with the
+    two existing dispatcher-overload and queue-exception serial warnings.
 - **Attack points:**
-- **Escalation:** <AUTHORIZED | BLOCKED | NEEDS_CONTEXT> — <detail>
+  - Registration and lane publication are deliberately package-private; task 17 must not expose
+    `RegionKey` or Folia API types through core/Bukkit signatures.
+  - A wave-2 `CommitAction` must run one unsplittable owner section, return `CommitOutcome`, and
+    must not throw after its first mutation. It updates the O(1) expiry record through
+    `updateDrainTerminal(RegisteredPlan, ChunkTerminalRecord)` at truthful phase boundaries.
+  - Rebind success is sent through the injected `NonBlockingHandoff` before target-lane enqueue.
+    This prevents an owning stale-lane drain from recursively running a second target-lane slice
+    in the same tick without taking the completion service's blocking lifecycle lock.
+  - Transfer `RETRY_BUSY` and `TARGET_SATURATED` retry off the owner thread until the permit
+    deadline; `PERMIT_CLOSED` makes both initial and continuation deadlines expire immediately.
+  - One task-13 regression run missed its existing cancel/delivery race condition; the immediate
+    rerun passed all 29 tests. The task-14 suite passed 14/14 five consecutive times.
+
+### Obligation 1 — `RegionKey`
+
+Implemented immutable value equality at `RegionKey.java:12-67`. A key re-derived with the same
+world UUID and observed live-region ID equals and hashes like the original. The task-13 test at
+`DefaultFoliaBackpressureTest.java:108-127` fills the one-region cap with the first key, retries
+with the re-derived key, and requires rejection plus one tracked `RegionState`. Identity equality
+would make the second admission succeed and the tracked-region count become two.
+
+### Obligation 2 — plan-producer ownership
+
+Exact caller seam:
+`Optional<RegisteredPlan> registerPlan(DefaultOperationCompletion, long chunkKey,
+long planSequence, ChunkTarget)` (`FoliaCommitBroker.java:202`). It performs
+`tryAcquirePlanProducer` then `DefaultOperationCompletion.register(token)`, binds that exact token
+through task 13's `DefaultFoliaBackpressure.BoundAdmission bind(PlanProducerToken)`, and returns
+the bound admission view through `RegisteredPlan.admission()`. There is no thread-local or
+operation-ID lookup. `cancelPlan(RegisteredPlan, Throwable)` owns operation-level
+`CANCELLED_BEFORE_MUTATION`; admission-attempt cancellation is filtered and leaves the plan live.
+
+The owner flush-expiry hook reads the prebuilt terminal record once and claims the producer; its
+test requires both the cancellation record and `registeredProducerCount() == 0`. Post-registration
+setup failures call `PlanProducerToken.rejectAdmission` and clean broker state.
+
+### Obligation 3 — C6 and task-16 seam
+
+Task 16 must call exactly one of:
+
+- `<T> CompletionStage<T> scheduleSync(ChunkTarget, SyncPriority, RegionCall<T>)`
+- `CompletionStage<Void> scheduleSyncTask(ChunkTarget, SyncPriority, RegionTask)`
+- `CompletionStage<Void> scheduleSync(EntityTarget, SyncPriority, EntityTask)`
+- `CompletionStage<Void> scheduleSyncGlobal(SyncPriority, GlobalTask)`
+
+Use `SyncPriority.NORMAL` for `sync` and `SyncPriority.WHEN_FREE` for `syncWhenFree`. Both enter the
+target lane's adaptive, lane-local time budget; NORMAL is polled before queued WHEN_FREE work.
+Global work runs directly inside the already-global broker drain. No global TPS signal is read.
+Task 17 must inject a `NonBlockingHandoff` whose `execute(Runnable)` only publishes off-owner work
+and never waits; the common-pool default is compatibility wiring, not the final lifecycle owner.
+The priority test fails if WHEN_FREE overtakes NORMAL. The integrated slice test advances the lane
+clock by 200 microseconds inside each commit and requires only four of ten units in the first
+750-microsecond slice; deferred or unmeasured actions execute all ten and fail it.
+
+### Obligation 4 — rejection hook
+
+Task 17 wires exactly one
+`AdmissionRejectionHandler rejectionHook(OperationCompletionService, AdmissionRejectionObserver)`
+(`FoliaCommitBroker.java:416`). The hook drops `CANCELLED`, submits only `REJECTED` to the
+completion service, and never terminalizes inline in the backpressure drain. The test invokes both
+outcomes, blocks the observer, requires the hook call to return promptly, and requires one observer
+call; unconditional cancellation forwarding or direct blocking fails it.
+
+### Obligation 5 — lanes, rebind, diagnostics, and abstract commit producer
+
+Each canonical observed-region key owns one synchronized mailbox. Commit operations use DRR
+quanta Interactive 4 / Normal 2 / Bulk 1, with a four-consecutive cap. Same-chunk eligibility is
+keyed by broker registration order, not plan sequence. The deterministic test expects the first
+round `I,I,I,I,N,N,B`, rejects a run over four, and registers sequence 2 before sequence 1 on the
+same chunk; weighting, run-cap, or plan-sequence ordering changes fail separate assertions.
+
+Stale merge lanes migrate admitted units through `NonBlockingHandoff` before any target mutation;
+the ten-unit merge test requires zero mutations after the first stale-lane drain and ten rebinds
+after settlement. Transfer refusal at its deadline must yield a terminal record with zero
+mutations. Continuations re-enter the same operation mailbox; an interactive competitor must run
+before the queued normal continuation. The lane-retirement test enqueues while the old scheduled
+flag is still held and fails if the post-release wake-up is lost.
+
+`diagnostics(RegionKey)` and `diagnosticsGlobal()` populate all frozen fields from task-13 pressure,
+task-12 dispatcher accessors, and broker counters. Tests cover multi-region aggregation, packet
+bytes, outstanding plans, rebinds, oldest-ready age, tickets/futures, and cleanup. The exact line is
+`FAWE_QUEUE depth=<readyChunks> inflight=<scheduledDrains+finalizerChains>
+outstanding=<outstandingChunks> region=<worldId:observedRegionId|global>`; any field mapping or
+format change fails exact string equality.
+
+- **Escalation:** NEEDS_CONTEXT — the collaborator contract has no safe abort for a
+  `PlanProducerToken` acquired by `tryAcquirePlanProducer` when
+  `DefaultOperationCompletion.register(token)` rejects before consuming it (closed admission or
+  duplicate registration). `rejectAdmission` is illegal before registration. Task 11/orchestrator
+  must add an acquired-token abort or make acquisition+registration atomic; task 14 preserves the
+  original registration exception and does not invoke an invalid terminalization. Concrete
+  GET/SET/finalizer content remains correctly deferred to wave 2 behind `CommitAction`.

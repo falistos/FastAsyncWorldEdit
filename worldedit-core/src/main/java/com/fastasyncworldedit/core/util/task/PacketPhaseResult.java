@@ -1,11 +1,25 @@
 package com.fastasyncworldedit.core.util.task;
 
 /**
- * Outcome of the packet phase for a committed chunk. Shape is not frozen by architecture v3 §3.6;
- * wave 1 fills it in.
+ * Outcome of the packet phase for a committed chunk.
  */
-public final class PacketPhaseResult {
+public record PacketPhaseResult(int requiredSends, int enqueuedSends) {
 
-    // wave 1
+    public PacketPhaseResult {
+        if (requiredSends < 0) {
+            throw new IllegalArgumentException("requiredSends must be non-negative");
+        }
+        if (enqueuedSends < 0 || enqueuedSends > requiredSends) {
+            throw new IllegalArgumentException("enqueuedSends must be between zero and requiredSends");
+        }
+    }
+
+    public static PacketPhaseResult noPackets() {
+        return new PacketPhaseResult(0, 0);
+    }
+
+    public boolean allEnqueued() {
+        return requiredSends == enqueuedSends;
+    }
 
 }

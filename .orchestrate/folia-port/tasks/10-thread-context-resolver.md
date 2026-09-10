@@ -99,8 +99,47 @@ is confirmed by the harness once task 17 registers a backend; record as pending 
 ---
 ## Dev record (worker fills this in on completion)
 
-- **Status:** <DONE | DONE_WITH_CONCERNS | BLOCKED>
+- **Status:** DONE_WITH_CONCERNS — implementation and static review complete; orchestrator-owned
+  graph compilation and task-17-dependent runtime confirmation remain pending.
 - **File List:**
-- **Deviations:**
+  - `worldedit-core/src/main/java/com/fastasyncworldedit/core/util/task/ContextResolver.java:12-30`
+    — implemented null rejection, atomic single registration, duplicate rejection, and
+    deterministic unresolved failure.
+  - `worldedit-bukkit/src/main/java/com/fastasyncworldedit/bukkit/util/BukkitThreadContext.java:20-56`
+    — created the Paper/Spigot backend. Ownership roles delegate to the old main-thread identity;
+    worker classification uses the explicit `FaweThread` marker.
+  - `.orchestrate/folia-port/tasks/10-thread-context-resolver.md:100` — completed this record.
+- **Deviations:** None. The backend name/package is
+  `com.fastasyncworldedit.bukkit.util.BukkitThreadContext`, beside the existing Bukkit utility
+  backend classes. Bootstrap files were intentionally not edited because registration is owned
+  by task 17.
 - **Attack points:**
-- **Escalation:** <AUTHORIZED | BLOCKED | NEEDS_CONTEXT> — <detail>
+  - Task 17 must extend the initial `WorldEditPlugin.onLoad()` branch at
+    `worldedit-bukkit/src/main/java/com/sk89q/worldedit/bukkit/WorldEditPlugin.java:131-138`:
+    register the Folia context after certification, or register `BukkitThreadContext` in the
+    non-Folia branch, before execution continues at line 140 and before `FaweBukkit` is created
+    at line 258.
+  - `FaweThreadContext.requireOwns` delegates directly to `ownsChunk` and throws on false at
+    `worldedit-core/src/main/java/com/fastasyncworldedit/core/util/task/FaweThreadContext.java:28-33`;
+    the Bukkit implementation therefore preserves the old main-thread guard exactly.
+  - The graph compile proof was not run by instruction. Runtime identity/marker confirmation is
+    pending task 17 registration and the required `smoke-set` harness run.
+- **Escalation:** AUTHORIZED — no frozen-signature or marker gap. `FaweBasicThreadFactory` and
+  `FaweForkJoinWorkerThreadFactory` construct marker-bearing threads at
+  `worldedit-core/src/main/java/com/fastasyncworldedit/core/util/task/FaweBasicThreadFactory.java:24-26`
+  and `worldedit-core/src/main/java/com/fastasyncworldedit/core/util/task/FaweForkJoinWorkerThreadFactory.java:20-23`.
+
+---
+## Cross-review outcome (Opus, fresh thread, 2026-07-17)
+
+**PASS-WITH-NOTES.** Registration concurrency, Paper behavior identity (per-call delegation
+correctly reproduces `setMainThread()` mutability), §1b purity, fail-fast, and F1 all pass.
+
+One MINOR, semantics-defining: `isFaweWorker()` == `instanceof FaweThread` covers exactly the
+extent-carrying prepare pools (QueueHandler ForkJoin primary/secondary + blocking executor).
+The UUID-key-queued executor (`UUIDKeyQueuedThreadFactory`) and `TaskManager`'s own
+pool/threads are FAWE-owned but NOT marked — by architecture §3.1 scoping ("unchanged pools" =
+prepare pools), consistent with the pre-existing `FaweThreadUtil` test. **Binding note for
+tasks 12/15/16/17: read `isFaweWorker()` as "extent-carrying prepare worker", never "any
+FAWE-owned thread".** Interface comment updated accordingly (comment-only, no signature
+change).

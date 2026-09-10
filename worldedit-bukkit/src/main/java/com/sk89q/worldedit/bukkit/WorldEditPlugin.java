@@ -20,12 +20,14 @@
 package com.sk89q.worldedit.bukkit;
 
 import com.fastasyncworldedit.bukkit.BukkitPermissionAttachmentManager;
+import com.fastasyncworldedit.bukkit.BackendSelector;
 import com.fastasyncworldedit.bukkit.FaweBukkit;
 import com.fastasyncworldedit.bukkit.folia.FoliaSupport;
 import com.fastasyncworldedit.bukkit.folia.UnsupportedFoliaVersionException;
 import com.fastasyncworldedit.core.Fawe;
 import com.fastasyncworldedit.core.util.UpdateNotification;
 import com.fastasyncworldedit.core.util.WEManager;
+import com.fastasyncworldedit.core.util.task.FawePlatformBackend;
 import com.google.common.base.Joiner;
 import com.google.common.collect.ImmutableList;
 import com.sk89q.bukkit.util.ClassSourceValidator;
@@ -119,6 +121,7 @@ public class WorldEditPlugin extends JavaPlugin {
     private BukkitServerInterface platform;
     private BukkitConfiguration config;
     private BukkitPermissionAttachmentManager permissionAttachmentManager;
+    private FawePlatformBackend faweBackend;
     // Fawe start
     private BukkitCommandSender bukkitConsoleCommandSender;
     // Fawe end
@@ -128,13 +131,15 @@ public class WorldEditPlugin extends JavaPlugin {
 
         //FAWE start - Folia port: detection precedes Paper detection, fail-closed before any
         // listener/executor/world access (spec §2, §2b); must be the very first thing on load.
-        if (FoliaSupport.isFolia()) {
+        boolean folia = FoliaSupport.isFolia();
+        if (folia) {
             try {
                 FoliaSupport.checkCertifiedOrFail();
             } catch (UnsupportedFoliaVersionException e) {
                 throw new IllegalStateException(e.getMessage(), e);
             }
         }
+        faweBackend = BackendSelector.selectAndRegister(folia, getClassLoader());
         //FAWE end
 
         //FAWE start
@@ -255,7 +260,7 @@ public class WorldEditPlugin extends JavaPlugin {
         verifier.reportMismatches(ImmutableList.of(World.class, CommandManager.class, EditSession.class, Actor.class));
 
         //FAWE start
-        new FaweBukkit(this);
+        new FaweBukkit(this, faweBackend);
         //FAWE end
 
         WorldEdit.getInstance().getEventBus().post(new PlatformsRegisteredEvent());
@@ -468,7 +473,11 @@ public class WorldEditPlugin extends JavaPlugin {
      */
     @Override
     public void onDisable() {
-        Fawe.instance().onDisable();
+        if (Fawe.instance() != null) {
+            Fawe.instance().onDisable();
+        } else if (faweBackend != null) {
+            faweBackend.shutdown();
+        }
         WorldEdit worldEdit = WorldEdit.getInstance();
         worldEdit.getSessionManager().unload();
         if (platform != null) {

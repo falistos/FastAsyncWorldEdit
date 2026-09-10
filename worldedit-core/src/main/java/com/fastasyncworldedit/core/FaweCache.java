@@ -16,6 +16,7 @@ import com.fastasyncworldedit.core.queue.implementation.QueuePool;
 import com.fastasyncworldedit.core.util.MathMan;
 import com.fastasyncworldedit.core.util.collection.CleanableThreadLocal;
 import com.fastasyncworldedit.core.util.task.FaweBasicThreadFactory;
+import com.fastasyncworldedit.core.util.task.FaweThreadContext;
 import com.google.common.cache.CacheBuilder;
 import com.google.common.cache.CacheLoader;
 import com.google.common.cache.LoadingCache;
@@ -156,8 +157,10 @@ public enum FaweCache implements Trimable {
      */
     public <V> LongFunction<V> createMainThreadSafeCache(Supplier<V> withInitial) {
         return new LongFunction<>() {
-            private final LoadingCache<Long, V> loadingCache = Fawe.isMainThread() ? null : FaweCache.INSTANCE.createCache(
-                    withInitial);
+            // Folia port: mutable filter state must not be cached on any server tick context.
+            private final LoadingCache<Long, V> loadingCache = FaweThreadContext.current().isTickThread()
+                    ? null
+                    : FaweCache.INSTANCE.createCache(withInitial);
 
             @Override
             public V apply(final long input) {

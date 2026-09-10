@@ -10,6 +10,52 @@ STATUS: DRAFT — not dispatched; pending wave-0 certification + user gate appro
 - **Cross-review:** ARMED — reviewer family Opus (fresh thread). Perimeter: adapters/bootstrap.
   This task is the wave-1 integration seam; certification review samples it.
 
+## ADDED SCOPE — architecture ruling r12 Q2 (2026-07-20), and it is load-bearing
+
+The task-15 double review established that **no `FaweThreadContext` is registered in production
+today**: `ContextResolver.register(...)` is called only from two test classes and
+`BukkitThreadContext` is never instantiated. Because `ContextResolver.resolve()` throws on null,
+all ~30 requalified predicate sites currently throw at runtime — **on Paper as well as Folia** —
+and `QueueHandler.run()`, a per-tick task, would throw every tick.
+
+r12 Q2 ruled that resolution stays **partial and fail-closed** (new §3.1 paragraph): there is no
+permissive default that both preserves Paper's legacy result and protects Folia ownership —
+defaulting to main-thread identity is fail-open on Folia, defaulting to no-ownership changes Paper
+scheduling semantics. **Bootstrap ordering is therefore contractual, and this task owns it:**
+
+- Register each backend's context **exactly once, before constructing or starting any component,
+  cache, supplier, scheduler, command path, or adapter capable of reaching a requalified
+  predicate**. On Paper/Spigot that is `BukkitThreadContext`; on Folia the Folia implementation.
+- Keep the registered context available through `stopAccepting`, drain, and disable completion.
+- Deliver an **ordering test** proving `QueueHandler.run()` and the other requalified paths cannot
+  execute before registration. A production call before registration is a bootstrap-order defect,
+  not a runtime condition to tolerate.
+
+Task 15 cannot claim runtime qualification complete until this lands.
+
+**AND THE FOLIA CONTEXT IMPLEMENTATION DOES NOT EXIST YET (orchestrator-verified 2026-07-20).**
+This task's mandate says "select and register the Folia backend services — `FaweThreadContext`
+(Folia impl)", which reads as though the implementation already exists. It does not. A tree-wide
+search for `implements FaweThreadContext` finds only `BukkitThreadContext` (bukkit main), the core
+interface itself, and two test fakes. **This task must WRITE the Folia `FaweThreadContext`
+implementation as well as register it** — `isTickThread` / `ownsChunk` / `ownsEntity` /
+`isGlobalContext` / `isFaweWorker` over Folia's real ownership queries, with `ownsChunk` and
+`ownsEntity` backed by genuine live ownership checks and never by region-ID comparison (region IDs
+are hints, never proof — spec §1b, W0.2 §3).
+
+This is load-bearing well beyond bootstrap: the task-16 concurrency review established that its
+entire no-block property rests on `isTickThread()`, and that if `BukkitThreadContext` were ever
+registered on Folia, `awaitGlobal` would park a region thread for 60 s — a guaranteed self-deadlock
+if it is the global thread. Backend selection must therefore be fail-closed, not best-effort.
+
+Note the C5 guard already reserves the name: `c5ApprovedBackends` in
+`build-logic/src/main/kotlin/buildlogic.common.gradle.kts` lists
+`worldedit-bukkit/folia/.../FoliaThreadContext.java` as an approved backend predicate
+implementation. That entry currently points at a file that does not exist — it is the slot you
+must fill. Also delete the `FoliaTickThreadGuard.java` allowance from `c5Allowances` once the real
+Folia context makes that raw `Bukkit::isPrimaryThread` fallback unnecessary; an allowance that
+outlives its reason silently becomes permanent.
+
 ## Mandate
 Wire the runtime side of the dual-platform bootstrap: after `FoliaSupport` detection (already
 in `WorldEditPlugin.onLoad`, fail-closed), select and register the Folia backend services —
@@ -102,8 +148,83 @@ dev record for the certification review).
 ---
 ## Dev record (worker fills this in on completion)
 
-- **Status:** <DONE | DONE_WITH_CONCERNS | BLOCKED>
+- **Status:** DONE_WITH_CONCERNS — wiring and focused tests are complete; Gradle, packaging,
+  and runtime harness confirmation remain orchestrator-owned.
 - **File List:**
+  - `worldedit-core/src/main/java/com/fastasyncworldedit/core/util/task/FawePlatformBackend.java:12`
+    — new core-owned bootstrap SPI. Frozen signature:
+    `registerThreadContext()`, `createTaskManager(Object)`, `createQueueHandler()`, `shutdown()`.
+  - `worldedit-core/src/main/java/com/fastasyncworldedit/core/queue/implementation/QueueHandler.java:116`
+    — ticket-authority injection and executor-shutdown hook.
+  - `worldedit-core/src/main/java/com/fastasyncworldedit/core/IFawe.java:67`
+    and `worldedit-core/src/main/java/com/fastasyncworldedit/core/Fawe.java:269` — backend disable hook.
+  - `worldedit-bukkit/src/main/java/com/fastasyncworldedit/bukkit/BackendSelector.java:14`
+    — lazy ServiceLoader selection, exact-one registration, and absent-backend operator failure.
+  - `worldedit-bukkit/src/main/java/com/fastasyncworldedit/bukkit/BukkitPlatformBackend.java:16`
+    — Paper/Spigot context, task manager, queue, authority, and shutdown graph.
+  - `worldedit-bukkit/src/main/java/com/fastasyncworldedit/bukkit/adapter/BukkitQueueHandler.java:13`
+    — Bukkit ticket-authority injection.
+  - `worldedit-bukkit/src/main/java/com/fastasyncworldedit/bukkit/FaweBukkit.java:66`
+    — selected-backend service factories and fail-closed initialization cleanup.
+  - `worldedit-bukkit/src/main/java/com/sk89q/worldedit/bukkit/WorldEditPlugin.java:129`
+    — detect, certify, select, and register in `onLoad`; consume in `onEnable`; stop on disable.
+  - `worldedit-bukkit/src/main/java/com/sk89q/worldedit/bukkit/BukkitEntity.java:64`
+    — internal opaque live-entity bridge for the separately compiled Folia module.
+  - `worldedit-bukkit/folia/src/main/java/com/fastasyncworldedit/bukkit/folia/FoliaThreadContext.java:12`
+    — live Folia tick/global/ownership predicates and the extent-carrying worker predicate.
+  - `worldedit-bukkit/folia/src/main/java/com/fastasyncworldedit/bukkit/folia/LiveFoliaTargetAdapter.java:11`
+    — fail-closed reflective unwrapping of the supplied Bukkit world/entity wrappers.
+  - `worldedit-bukkit/folia/src/main/java/com/fastasyncworldedit/bukkit/folia/FoliaWorldHandle.java:27`
+    and `worldedit-bukkit/folia/src/main/java/com/fastasyncworldedit/bukkit/folia/FoliaEntityHandle.java:27`
+    — validated live ownership-query handles.
+  - `worldedit-bukkit/folia/src/main/java/com/fastasyncworldedit/bukkit/folia/LiveRegionObserver.java:14`
+    — backend observer; region ID is recorded only as lane metadata, never ownership proof.
+  - `worldedit-bukkit/folia/src/main/java/com/fastasyncworldedit/bukkit/folia/FoliaPlatformBackend.java:17`
+    — Folia entry point and complete shared dispatcher/backpressure/broker/completion/cache graph.
+  - `worldedit-bukkit/folia/src/main/java/com/fastasyncworldedit/bukkit/folia/DefaultFoliaBackpressure.java:266`
+    — package-local ordered shutdown entry point.
+  - `worldedit-bukkit/folia/src/main/java/com/fastasyncworldedit/bukkit/folia/FoliaTickThreadGuard.java:17`
+    — production guard now uses only the registered context.
+  - `worldedit-bukkit/folia/src/main/resources/META-INF/services/`
+    `com.fastasyncworldedit.core.util.task.FawePlatformBackend:1` — ServiceLoader provider.
+  - `build-logic/src/main/kotlin/buildlogic.common.gradle.kts:109` — the real Folia context fills
+    the reserved backend slot; the temporary `FoliaTickThreadGuard` C5 allowance is deleted from
+    `c5Allowances` at line 117. No temporary W1 allowance remains.
+  - `worldedit-core/src/test/java/com/fastasyncworldedit/core/util/task/BootstrapOrderingTest.java:17`
+    — real `QueueHandler.run()` fails before registration and reaches the predicate afterward.
+  - `worldedit-bukkit/src/test/java/com/fastasyncworldedit/bukkit/BackendSelectorTest.java:18`
+    — lazy non-Folia discovery, exact absent-backend message, and service-factory ordering.
+  - `worldedit-bukkit/folia/src/test/java/com/fastasyncworldedit/bukkit/folia/FoliaThreadContextTest.java:18`
+    — live ownership beats opposing region hints; tick/global and worker semantics are executable.
 - **Deviations:**
+  - Chose the preferred core-owned ServiceLoader SPI. The Folia provider reflectively unwraps
+    Bukkit-main wrappers because the Java-25 Folia module has no compile dependency on Bukkit main.
+  - Audited init order: `WorldEditPlugin.onLoad` detects Folia (`:134`), certifies it (`:135`),
+    selects and registers the context (`:142`), then performs ordinary plugin setup (`:145+`).
+    `onEnable` creates `FaweBukkit` (`:263`); its constructor creates the selected TaskManager
+    (`FaweBukkit.java:69`) before `Fawe.set` (`:71`). The Folia manager's first guard/context read
+    is therefore after registration. `Fawe` installs that manager (`Fawe.java:110`) before it
+    starts scheduled work. The first queue request delegates to the backend (`FaweBukkit.java:111`),
+    constructs the shared graph, and only then registers `QueueHandler.run()`.
+  - The one Folia `OperationCompletionService` is shared by dispatcher, backpressure, and broker.
+    Disable is `stopAccepting -> drain -> completion flush -> executor shutdown`.
+  - Per task constraints, no Gradle, packaging, or harness command was run. Focused verification
+    used JDK 25 `javac` with `--release 21` for core/Bukkit and `--release 25` for Folia, then the
+    JUnit Platform launcher: 7 tests found, 7 successful. `git diff --check` also passed. These
+    terminal-only checks produced no persisted log. Standards and Spec re-reviews found no
+    remaining actionable gap.
+  - `FoliaSupport.CERTIFIED_MINECRAFT_VERSIONS` remains exactly `Set.of("26.1.2")`.
 - **Attack points:**
-- **Escalation:** <AUTHORIZED | BLOCKED | NEEDS_CONTEXT> — <detail>
+  - Harness must run `smoke-set --version 26.1.2 --with-plugin` and prove live detection,
+    provider discovery, correct region/entity/global ownership, no ownership-violation scan hits,
+    and the ordered bounded shutdown on a real Folia server.
+  - The fail-closed harness leg must run the Spigot artifact on Folia and reproduce the tested
+    operator message without listener, scheduler, command, or FAWE singleton half-initialization.
+  - The Paper 26.1.2 leg must prove the Folia provider and all Java-25 backend classes stay unloaded.
+  - Packaging inspection must re-prove the provider class and descriptor exist only in the Paper
+    artifact. The reflective `BukkitWorld.getWorld` / `BukkitEntity.getEntityHandle` bridges must
+    also be exercised by the certified runtime.
+  - Wave 2 must replace `CommitAction.unavailable()` before real chunk operations are admitted.
+- **Escalation:** AUTHORIZED — no ownership predicate or init ordering was guessed; live Folia API
+  predicates and the concrete bootstrap call chain were verified. Runtime and packaging gates are
+  intentionally deferred to the orchestrator, so status remains `DONE_WITH_CONCERNS`.

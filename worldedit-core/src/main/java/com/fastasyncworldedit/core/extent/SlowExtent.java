@@ -1,6 +1,6 @@
 package com.fastasyncworldedit.core.extent;
 
-import com.fastasyncworldedit.core.Fawe;
+import com.fastasyncworldedit.core.util.task.FaweThreadContext;
 import com.sk89q.worldedit.WorldEditException;
 import com.sk89q.worldedit.extent.AbstractDelegateExtent;
 import com.sk89q.worldedit.extent.Extent;
@@ -27,7 +27,8 @@ public class SlowExtent extends AbstractDelegateExtent {
         increment += nanos;
         if (increment >= THRESHOLD) {
             long wait = increment / 1000000;
-            if (!Fawe.isMainThread()) {
+            // Folia port: no server tick context may be deliberately slept.
+            if (!FaweThreadContext.current().isTickThread()) {
                 try {
                     Thread.sleep(wait);
                 } catch (InterruptedException e) {

@@ -2,13 +2,19 @@ package com.fastasyncworldedit.bukkit.adapter;
 
 import com.fastasyncworldedit.bukkit.FaweBukkitWorld;
 import com.fastasyncworldedit.core.FAWEPlatformAdapterImpl;
-import com.fastasyncworldedit.core.Fawe;
 import com.fastasyncworldedit.core.math.IntPair;
 import com.fastasyncworldedit.core.queue.IChunkGet;
+import com.fastasyncworldedit.core.queue.implementation.QueueHandlerRouting;
 import com.fastasyncworldedit.core.util.MathMan;
 import com.fastasyncworldedit.core.util.ReflectionUtils;
+import com.fastasyncworldedit.core.util.task.ChunkTarget;
+import com.fastasyncworldedit.core.util.task.FaweThreadContext;
+import com.sk89q.worldedit.world.World;
 import com.sk89q.worldedit.world.block.BlockTypesCache;
 
+import java.util.Objects;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionStage;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.locks.StampedLock;
 import java.util.function.IntFunction;
@@ -127,10 +133,13 @@ public class NMSAdapter implements FAWEPlatformAdapterImpl {
             LevelChunkSection value,
             int layer
     ) {
+        if (!QueueHandlerRouting.permitsLegacyLocationFreeLiveState()) {
+            throw new IllegalStateException("The legacy location-free section CAS is disabled on this backend");
+        }
         if (layer < 0 || layer >= sections.length) {
             return false;
         }
-        if (Fawe.isMainThread()) {
+        if (FaweThreadContext.current().isGlobalContext()) {
             return ReflectionUtils.compareAndSet(sections, expected, value, layer);
         }
         StampLockHolder holder = new StampLockHolder();
@@ -163,6 +172,45 @@ public class NMSAdapter implements FAWEPlatformAdapterImpl {
                 return lock;
             });
         }
+    }
+
+    /** Atomically replace one live section solely inside its owning chunk callback. */
+    protected static <S> CompletionStage<Boolean> setSectionAtomic(
+            World world,
+            IntPair pair,
+            S[] sections,
+            S expected,
+            S value,
+            int layer
+    ) {
+        return setSectionAtomic(world, pair, sections, expected, value, layer, ReflectionUtils::compareAndSet);
+    }
+
+    static <S> CompletionStage<Boolean> setSectionAtomic(
+            World world,
+            IntPair pair,
+            S[] sections,
+            S expected,
+            S value,
+            int layer,
+            SectionCompareAndSet<S> compareAndSet
+    ) {
+        if (layer < 0 || layer >= sections.length) {
+            return CompletableFuture.completedFuture(false);
+        }
+        SectionCompareAndSet<S> checkedCompareAndSet = Objects.requireNonNull(compareAndSet, "compareAndSet");
+        ChunkTarget target = new ChunkTarget(world, pair.x(), pair.z());
+        return QueueHandlerRouting.syncOn(target, ticket -> {
+            ticket.assertOwns(pair.x(), pair.z());
+            return checkedCompareAndSet.compareAndSet(sections, expected, value, layer);
+        });
+    }
+
+    @FunctionalInterface
+    interface SectionCompareAndSet<S> {
+
+        boolean compareAndSet(S[] sections, S expected, S value, int layer);
+
     }
 
     /**

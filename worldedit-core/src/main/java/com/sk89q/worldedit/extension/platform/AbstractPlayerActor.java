@@ -30,6 +30,7 @@ import com.fastasyncworldedit.core.util.MainUtil;
 import com.fastasyncworldedit.core.util.TaskManager;
 import com.fastasyncworldedit.core.util.WEManager;
 import com.fastasyncworldedit.core.util.task.AsyncNotifyKeyedQueue;
+import com.fastasyncworldedit.core.util.task.FaweThreadContext;
 import com.sk89q.worldedit.EditSession;
 import com.sk89q.worldedit.MaxChangedBlocksException;
 import com.sk89q.worldedit.WorldEdit;
@@ -533,7 +534,8 @@ public abstract class AbstractPlayerActor implements Actor, Player, Cloneable {
     @Override
     public void loadClipboardFromDisk() {
         if (!clipboardLoading.tryAcquire()) {
-            if (!Fawe.isMainThread()) {
+            // Folia port: never block any server tick context on clipboard I/O serialization.
+            if (!FaweThreadContext.current().isTickThread()) {
                 try {
                     clipboardLoading.acquire();
                     clipboardLoading.release();
@@ -572,7 +574,8 @@ public abstract class AbstractPlayerActor implements Actor, Player, Cloneable {
                     clipboardLoading.release();
                 }
             });
-            if (Fawe.isMainThread()) {
+            // Folia port: never wait for clipboard I/O from any server tick context.
+            if (FaweThreadContext.current().isTickThread()) {
                 return;
             }
             fut.get();

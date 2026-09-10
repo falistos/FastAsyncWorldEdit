@@ -29,6 +29,7 @@ import com.sk89q.worldedit.extent.Extent;
 import com.sk89q.worldedit.util.Location;
 import com.sk89q.worldedit.world.NullWorld;
 import org.bukkit.entity.EntityType;
+import org.jetbrains.annotations.ApiStatus;
 
 import javax.annotation.Nullable;
 import java.lang.ref.WeakReference;
@@ -58,6 +59,17 @@ public class BukkitEntity implements Entity {
         this.type = entity.getType();
         //FAWE end
         this.entityRef = new WeakReference<>(entity);
+    }
+
+    /**
+     * Returns the live Bukkit handle, or {@code null} after it has been retired.
+     *
+     * <p>Internal backend bridge; callers must perform their own ownership check before access.</p>
+    */
+    @ApiStatus.Internal
+    @Nullable
+    public Object getEntityHandle() {
+        return entityRef.get();
     }
 
     @Override

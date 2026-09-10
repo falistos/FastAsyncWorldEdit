@@ -19,6 +19,7 @@ import com.fastasyncworldedit.core.queue.implementation.chunk.ChunkHolder;
 import com.fastasyncworldedit.core.queue.implementation.chunk.NullChunk;
 import com.fastasyncworldedit.core.util.MathMan;
 import com.fastasyncworldedit.core.util.MemUtil;
+import com.fastasyncworldedit.core.util.task.FaweThreadContext;
 import com.fastasyncworldedit.core.wrappers.WorldWrapper;
 import com.google.common.util.concurrent.Futures;
 import com.sk89q.worldedit.EditSession;
@@ -255,7 +256,12 @@ public class SingleThreadQueueExtent extends ExtentBatchProcessorHolder implemen
 
         chunk.invalidateWrapper();
 
-        if (Fawe.isMainThread()) {
+        // Folia port: a world target requires ownership; a non-world extent has no foreign target.
+        FaweThreadContext threadContext = FaweThreadContext.current();
+        boolean mayCallInline = world == null
+                ? threadContext.isTickThread()
+                : threadContext.ownsChunk(world, chunk.getX(), chunk.getZ());
+        if (mayCallInline) {
             V result = (V) chunk.call();
             if (result == null) {
                 return (V) (Future) Futures.immediateFuture(null);

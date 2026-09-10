@@ -53,6 +53,7 @@ import com.fastasyncworldedit.core.queue.implementation.ParallelQueueExtent;
 import com.fastasyncworldedit.core.regions.RegionWrapper;
 import com.fastasyncworldedit.core.util.MemUtil;
 import com.fastasyncworldedit.core.util.Permission;
+import com.fastasyncworldedit.core.util.task.FaweThreadContext;
 import com.fastasyncworldedit.core.wrappers.WorldWrapper;
 import com.google.common.base.Preconditions;
 import com.sk89q.worldedit.entity.Player;
@@ -500,7 +501,9 @@ public final class EditSessionBuilder {
                 wnaMode = false;
                 if (unwrapped instanceof IQueueExtent) {
                     extent = queue = (IQueueExtent) unwrapped;
-                } else if (Settings.settings().QUEUE.PARALLEL_THREADS > 1 && !Fawe.isMainThread()) {
+                // Folia port: queue parallelism is selected by tick role, not one legacy thread identity.
+                } else if (Settings.settings().QUEUE.PARALLEL_THREADS > 1
+                        && !FaweThreadContext.current().isTickThread()) {
                     ParallelQueueExtent parallel = new ParallelQueueExtent(
                             Fawe.instance().getQueueHandler(),
                             world,

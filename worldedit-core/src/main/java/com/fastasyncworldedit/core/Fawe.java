@@ -13,6 +13,7 @@ import com.fastasyncworldedit.core.util.RandomTextureUtil;
 import com.fastasyncworldedit.core.util.TaskManager;
 import com.fastasyncworldedit.core.util.TextureUtil;
 import com.fastasyncworldedit.core.util.WEManager;
+import com.fastasyncworldedit.core.util.task.FaweThreadContext;
 import com.fastasyncworldedit.core.util.task.KeyQueuedExecutorService;
 import com.fastasyncworldedit.core.util.task.UUIDKeyQueuedThreadFactory;
 import com.github.luben.zstd.Zstd;
@@ -207,6 +208,10 @@ public class Fawe {
         }
     }
 
+    /**
+     * @deprecated Requalify the caller to a predicate on {@link FaweThreadContext}.
+     */
+    @Deprecated
     public static boolean isMainThread() {
         return instance == null || instance.thread == Thread.currentThread();
     }
@@ -265,6 +270,7 @@ public class Fawe {
         if (platform().getPreloader(false) != null) {
             platform().getPreloader(false).cancel();
         }
+        platform().onDisable();
     }
 
     public QueueHandler getQueueHandler() {

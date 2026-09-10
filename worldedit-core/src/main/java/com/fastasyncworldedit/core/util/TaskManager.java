@@ -3,6 +3,7 @@ package com.fastasyncworldedit.core.util;
 import com.fastasyncworldedit.core.Fawe;
 import com.fastasyncworldedit.core.configuration.Settings;
 import com.fastasyncworldedit.core.queue.implementation.QueueHandler;
+import com.fastasyncworldedit.core.util.task.FaweThreadContext;
 import com.fastasyncworldedit.core.util.task.RunnableVal;
 import com.sk89q.worldedit.internal.util.LogManagerCompat;
 import org.apache.logging.log4j.Logger;
@@ -161,13 +162,15 @@ public abstract class TaskManager {
      */
     public void runUnsafe(Runnable run) {
         QueueHandler queue = Fawe.instance().getQueueHandler();
-        queue.startUnsafe(Fawe.isMainThread());
+        // Folia port: unsafe global toggles are meaningful only from the global context.
+        queue.startUnsafe(FaweThreadContext.current().isGlobalContext());
         try {
             run.run();
         } catch (Throwable e) {
             e.printStackTrace();
         }
-        queue.endUnsafe(Fawe.isMainThread());
+        // Folia port: pair the unsafe scope using the same global-context classification.
+        queue.endUnsafe(FaweThreadContext.current().isGlobalContext());
     }
 
     /**
@@ -192,7 +195,8 @@ public abstract class TaskManager {
      * @param runnable the task to run
      */
     public void taskNowMain(@Nonnull final Runnable runnable) {
-        if (Fawe.isMainThread()) {
+        // Folia port: a location-free task already on any tick context runs in that context.
+        if (FaweThreadContext.current().isTickThread()) {
             runnable.run();
         } else {
             task(runnable);
@@ -203,10 +207,11 @@ public abstract class TaskManager {
      * Run a task as soon as possible not on the main thread.
      *
      * @param runnable the task to run
-     * @see Fawe#isMainThread()
+     * @see FaweThreadContext#isTickThread()
      */
     public void taskNowAsync(@Nonnull final Runnable runnable) {
-        taskNow(runnable, Fawe.isMainThread());
+        // Folia port: move work away from every server tick context, not one legacy thread.
+        taskNow(runnable, FaweThreadContext.current().isTickThread());
     }
 
     /**
@@ -308,7 +313,8 @@ public abstract class TaskManager {
     }
 
     public void taskWhenFree(@Nonnull Runnable run) {
-        if (Fawe.isMainThread()) {
+        // Folia port: location-free sync executes inline from the caller's tick context.
+        if (FaweThreadContext.current().isTickThread()) {
             run.run();
         } else {
             Fawe.instance().getQueueHandler().sync(run);
@@ -321,7 +327,8 @@ public abstract class TaskManager {
      * - Usually wait time is around 25ms<br>
      */
     public <T> T syncWhenFree(@Nonnull final RunnableVal<T> function) {
-        if (Fawe.isMainThread()) {
+        // Folia port: never enqueue and wait when already on a server tick context.
+        if (FaweThreadContext.current().isTickThread()) {
             function.run();
             return function.value;
         }
@@ -338,7 +345,8 @@ public abstract class TaskManager {
      * - Usually wait time is around 25ms<br>
      */
     public <T> T syncWhenFree(@Nonnull final Supplier<T> supplier) {
-        if (Fawe.isMainThread()) {
+        // Folia port: never enqueue and wait when already on a server tick context.
+        if (FaweThreadContext.current().isTickThread()) {
             return supplier.get();
         }
         try {
@@ -363,7 +371,8 @@ public abstract class TaskManager {
      * - Usually wait time is around 25ms<br>
      */
     public <T> T sync(final Supplier<T> function) {
-        if (Fawe.isMainThread()) {
+        // Folia port: location-free sync executes inline from the caller's tick context.
+        if (FaweThreadContext.current().isTickThread()) {
             return function.get();
         }
         try {

@@ -19,7 +19,9 @@
 
 package com.sk89q.worldedit.bukkit;
 
+import com.fastasyncworldedit.core.queue.implementation.QueueHandlerRouting;
 import com.fastasyncworldedit.core.util.TaskManager;
+import com.fastasyncworldedit.core.util.task.ChunkTarget;
 import com.sk89q.worldedit.WorldEdit;
 import com.sk89q.worldedit.extension.platform.AbstractCommandBlockActor;
 import com.sk89q.worldedit.session.SessionKey;
@@ -29,7 +31,6 @@ import com.sk89q.worldedit.util.formatting.text.Component;
 import com.sk89q.worldedit.util.formatting.text.TextComponent;
 import com.sk89q.worldedit.util.formatting.text.adapter.bukkit.TextAdapter;
 import com.sk89q.worldedit.util.formatting.text.format.TextColor;
-import org.bukkit.Bukkit;
 import org.bukkit.Material;
 import org.bukkit.block.Block;
 import org.bukkit.command.BlockCommandSender;
@@ -37,6 +38,7 @@ import org.bukkit.command.BlockCommandSender;
 import java.nio.charset.StandardCharsets;
 import java.util.Locale;
 import java.util.UUID;
+import java.util.concurrent.CompletionStage;
 
 import static com.google.common.base.Preconditions.checkNotNull;
 
@@ -45,14 +47,12 @@ public class BukkitBlockCommandSender extends AbstractCommandBlockActor {
     private static final String UUID_PREFIX = "CMD";
 
     private final BlockCommandSender sender;
-    private final WorldEditPlugin plugin;
     private final UUID uuid;
 
     public BukkitBlockCommandSender(WorldEditPlugin plugin, BlockCommandSender sender) {
         super(BukkitAdapter.adapt(checkNotNull(sender).getBlock().getLocation()));
         checkNotNull(plugin);
 
-        this.plugin = plugin;
         this.sender = sender;
         this.uuid = UUID.nameUUIDFromBytes((UUID_PREFIX + sender.getName()).getBytes(StandardCharsets.UTF_8));
     }
@@ -168,6 +168,12 @@ public class BukkitBlockCommandSender extends AbstractCommandBlockActor {
 
     @Override
     public SessionKey getSessionKey() {
+        Block commandBlock = sender.getBlock();
+        ChunkTarget target = new ChunkTarget(
+                BukkitAdapter.adapt(commandBlock.getWorld()),
+                commandBlock.getX() >> 4,
+                commandBlock.getZ() >> 4
+        );
         return new SessionKey() {
 
             private volatile boolean active = true;
@@ -191,19 +197,7 @@ public class BukkitBlockCommandSender extends AbstractCommandBlockActor {
 
             @Override
             public boolean isActive() {
-                if (Bukkit.isPrimaryThread()) {
-                    // we can update eagerly
-                    updateActive();
-                } else {
-                    // we should update it eventually
-                    Bukkit.getScheduler().callSyncMethod(
-                            plugin,
-                            () -> {
-                                updateActive();
-                                return null;
-                            }
-                    );
-                }
+                routeActiveUpdate(target, this::updateActive);
                 return active;
             }
 
@@ -217,6 +211,13 @@ public class BukkitBlockCommandSender extends AbstractCommandBlockActor {
                 return uuid;
             }
         };
+    }
+
+    static CompletionStage<Void> routeActiveUpdate(ChunkTarget target, Runnable update) {
+        return QueueHandlerRouting.syncOn(target, ticket -> {
+            ticket.assertOwns(target.chunkX(), target.chunkZ());
+            update.run();
+        });
     }
 
 }

@@ -64,4 +64,8 @@ public interface IFawe {
 
     FAWEPlatformAdapterImpl getPlatformAdapter();
 
+    /** Platform lifecycle hook invoked after FAWE stops accepting new work. */
+    default void onDisable() {
+    }
+
 }

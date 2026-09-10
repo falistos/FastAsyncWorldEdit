@@ -224,6 +224,8 @@ Nothing here disposes a threshold value (task out-of-scope). Slots:
 - `QUEUE_DEPTH_MAX`, `OUTSTANDING_MAX`.
 - `HEAP_PASTE_MB`, `HEAP_SUSTAIN_MB`, `GC_PAUSE_MS`.
 - `SHUTDOWN_DRAIN_MS`.
+- `HISTORY_PERSIST_RETRIES` (+ backoff) — bounded retry policy of the §3.6b persistence
+  settlement (added by the 2026-07-17 adjudication).
 - `maxInFlightPerRegion` (FoliaBackpressure bound; a W0.2 tuning output that this artifact
   then gates against).
 

@@ -1,6 +1,5 @@
 package com.fastasyncworldedit.bukkit;
 
-import com.fastasyncworldedit.bukkit.adapter.BukkitQueueHandler;
 import com.fastasyncworldedit.bukkit.adapter.NMSAdapter;
 import com.fastasyncworldedit.bukkit.listener.BrushListener;
 import com.fastasyncworldedit.bukkit.listener.ChunkListener9;
@@ -10,7 +9,6 @@ import com.fastasyncworldedit.bukkit.regions.GriefPreventionFeature;
 import com.fastasyncworldedit.bukkit.regions.ResidenceFeature;
 import com.fastasyncworldedit.bukkit.regions.TownyFeature;
 import com.fastasyncworldedit.bukkit.regions.WorldGuardFeature;
-import com.fastasyncworldedit.bukkit.util.BukkitTaskManager;
 import com.fastasyncworldedit.bukkit.util.ItemUtil;
 import com.fastasyncworldedit.bukkit.util.image.BukkitImageViewer;
 import com.fastasyncworldedit.core.FAWEPlatformAdapterImpl;
@@ -24,6 +22,7 @@ import com.fastasyncworldedit.core.regions.FaweMaskManager;
 import com.fastasyncworldedit.core.util.TaskManager;
 import com.fastasyncworldedit.core.util.WEManager;
 import com.fastasyncworldedit.core.util.image.ImageViewer;
+import com.fastasyncworldedit.core.util.task.FawePlatformBackend;
 import com.plotsquared.core.PlotSquared;
 import com.sk89q.worldedit.WorldEdit;
 import com.sk89q.worldedit.bukkit.BukkitAdapter;
@@ -57,13 +56,17 @@ public class FaweBukkit implements IFawe, Listener {
     private static final Logger LOGGER = LogManagerCompat.getLogger();
 
     private final Plugin plugin;
+    private final FawePlatformBackend backend;
+    private final TaskManager taskManager;
     private final FAWEPlatformAdapterImpl platformAdapter;
     private ItemUtil itemUtil;
     private Preloader preloader;
     private volatile boolean keepUnloaded;
 
-    public FaweBukkit(Plugin plugin) {
+    public FaweBukkit(Plugin plugin, FawePlatformBackend backend) {
         this.plugin = plugin;
+        this.backend = backend;
+        this.taskManager = backend.createTaskManager(plugin);
         try {
             Fawe.set(this);
             Fawe.setupInjector();
@@ -76,8 +79,8 @@ public class FaweBukkit implements IFawe, Listener {
                 new RenderListener(plugin);
             }
         } catch (final Throwable e) {
-            e.printStackTrace();
-            Bukkit.getServer().shutdown();
+            backend.shutdown();
+            throw new IllegalStateException("FastAsyncWorldEdit failed during backend initialization", e);
         }
 
         platformAdapter = new NMSAdapter();
@@ -106,7 +109,7 @@ public class FaweBukkit implements IFawe, Listener {
 
     @Override
     public QueueHandler getQueueHandler() {
-        return new BukkitQueueHandler();
+        return backend.createQueueHandler();
     }
 
     @Override
@@ -172,7 +175,12 @@ public class FaweBukkit implements IFawe, Listener {
      */
     @Override
     public TaskManager getTaskManager() {
-        return new BukkitTaskManager(plugin);
+        return taskManager;
+    }
+
+    @Override
+    public void onDisable() {
+        backend.shutdown();
     }
 
     public Plugin getPlugin() {

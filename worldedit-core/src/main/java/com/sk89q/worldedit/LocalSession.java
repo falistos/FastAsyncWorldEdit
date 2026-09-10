@@ -37,6 +37,7 @@ import com.fastasyncworldedit.core.util.StringMan;
 import com.fastasyncworldedit.core.util.TaskManager;
 import com.fastasyncworldedit.core.util.TextureHolder;
 import com.fastasyncworldedit.core.util.TextureUtil;
+import com.fastasyncworldedit.core.util.task.FaweThreadContext;
 import com.fastasyncworldedit.core.wrappers.WorldWrapper;
 import com.sk89q.jchronic.Chronic;
 import com.sk89q.jchronic.Options;
@@ -413,17 +414,18 @@ public class LocalSession implements TextureHolder {
      */
     public void clearHistory() {
         //FAWE start
-        boolean mainThread = Fawe.isMainThread();
-        if (mainThread && !historyWriteLock.tryLock()) {
-            // Do not make main thread wait if we cannot immediately clear history (on player logout usually)
+        // Folia port: no server tick context may block on the history write lock.
+        boolean tickThread = FaweThreadContext.current().isTickThread();
+        if (tickThread && !historyWriteLock.tryLock()) {
+            // Do not make a tick thread wait if we cannot immediately clear history (on player logout usually)
             TaskManager.taskManager().async(this::clearHistoryTask);
             return;
         }
         try {
             clearHistoryTask();
         } finally {
-            // only if we are on the main thread, we ever called tryLock -> need to unlock again
-            if (mainThread) {
+            // Only a tick thread called tryLock above, so only that path needs this unlock.
+            if (tickThread) {
                 historyWriteLock.unlock();
             }
         }

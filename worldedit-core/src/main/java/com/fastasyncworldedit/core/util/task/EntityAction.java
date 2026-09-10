@@ -1,11 +1,22 @@
 package com.fastasyncworldedit.core.util.task;
 
-/**
- * An entity mutation actually performed during a commit (UUID + action). Component shape is not
- * frozen by architecture v3 §3.6; wave 1 fills it in.
- */
-public final class EntityAction {
+import java.util.Objects;
+import java.util.UUID;
 
-    // wave 1
+/**
+ * An entity mutation actually performed during a commit.
+ */
+public record EntityAction(UUID entityId, Type type) {
+
+    public EntityAction {
+        Objects.requireNonNull(entityId, "entityId");
+        Objects.requireNonNull(type, "type");
+    }
+
+    public enum Type {
+        ADDED,
+        REMOVED,
+        CHANGED
+    }
 
 }

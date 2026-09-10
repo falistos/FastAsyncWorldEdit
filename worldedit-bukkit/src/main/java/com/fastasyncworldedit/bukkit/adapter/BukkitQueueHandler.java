@@ -3,11 +3,16 @@ package com.fastasyncworldedit.bukkit.adapter;
 import co.aikar.timings.Timings;
 import com.fastasyncworldedit.bukkit.listener.ChunkListener;
 import com.fastasyncworldedit.core.queue.implementation.QueueHandler;
+import com.fastasyncworldedit.core.util.task.TicketAuthority;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 
 public class BukkitQueueHandler extends QueueHandler {
+
+    public BukkitQueueHandler(TicketAuthority ticketAuthority) {
+        super(ticketAuthority);
+    }
 
     private volatile boolean timingsEnabled;
     private static boolean alertTimingsChange = true;

@@ -1,5 +1,6 @@
 package com.fastasyncworldedit.core.util.task;
 
+import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -13,4 +14,12 @@ public record ChunkTerminalRecord(
         AppliedReceipt applied,                  // empty receipt for pre-mutation statuses
         Optional<Throwable> failure
 ) {
+
+    public ChunkTerminalRecord {
+        Objects.requireNonNull(operationId, "operationId");
+        Objects.requireNonNull(status, "status");
+        Objects.requireNonNull(applied, "applied");
+        Objects.requireNonNull(failure, "failure");
+    }
+
 }

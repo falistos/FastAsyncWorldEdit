@@ -1,6 +1,5 @@
 package com.fastasyncworldedit.bukkit.regions.plotsquared;
 
-import com.fastasyncworldedit.core.Fawe;
 import com.fastasyncworldedit.core.FaweAPI;
 import com.fastasyncworldedit.core.FaweCache;
 import com.fastasyncworldedit.core.extent.clipboard.io.FastSchematicReaderV2;
@@ -8,6 +7,7 @@ import com.fastasyncworldedit.core.extent.clipboard.io.FastSchematicWriterV2;
 import com.fastasyncworldedit.core.jnbt.CompressedCompoundTag;
 import com.fastasyncworldedit.core.jnbt.CompressedSchematicTag;
 import com.fastasyncworldedit.core.util.IOUtil;
+import com.fastasyncworldedit.core.util.task.FaweThreadContext;
 import com.plotsquared.core.PlotSquared;
 import com.plotsquared.core.configuration.Settings;
 import com.plotsquared.core.configuration.caption.TranslatableCaption;
@@ -162,7 +162,8 @@ public class FaweDelegateSchematicHandler {
                 }
             }
         };
-        if (Fawe.isMainThread()) {
+        // Folia port: paste preparation must leave every server tick context.
+        if (FaweThreadContext.current().isTickThread()) {
             com.fastasyncworldedit.core.util.TaskManager.taskManager().async(r);
         } else {
             r.run();

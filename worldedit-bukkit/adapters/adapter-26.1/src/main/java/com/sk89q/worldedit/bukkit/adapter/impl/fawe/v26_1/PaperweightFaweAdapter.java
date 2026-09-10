@@ -11,6 +11,7 @@ import com.fastasyncworldedit.core.queue.IBatchProcessor;
 import com.fastasyncworldedit.core.queue.IChunkGet;
 import com.fastasyncworldedit.core.queue.implementation.packet.ChunkPacket;
 import com.fastasyncworldedit.core.util.TaskManager;
+import com.fastasyncworldedit.core.util.task.EntityTarget;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
@@ -367,7 +368,7 @@ public final class PaperweightFaweAdapter extends FaweAdapter<net.minecraft.nbt.
             //add Id for AbstractChangeSet to work
             return output.toBuilder().putString("Id", id).build();
         };
-        return new LazyBaseEntity(type, saveTag);
+        return new LazyBaseEntity(type, new EntityTarget(BukkitAdapter.adapt(entity)), saveTag);
     }
 
     @Override

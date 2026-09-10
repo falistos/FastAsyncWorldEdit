@@ -1,9 +1,7 @@
 package com.sk89q.worldedit.bukkit.adapter.impl.fawe.v26_1;
 
-import com.fastasyncworldedit.core.Fawe;
 import com.fastasyncworldedit.core.math.IntPair;
-import com.fastasyncworldedit.core.util.TaskManager;
-import com.fastasyncworldedit.core.util.task.RunnableVal;
+import com.fastasyncworldedit.core.util.task.FaweThreadContext;
 import com.sk89q.worldedit.bukkit.BukkitAdapter;
 import com.sk89q.worldedit.internal.block.BlockStateIdAccess;
 import com.sk89q.worldedit.internal.wna.WorldNativeAccess;
@@ -29,10 +27,16 @@ import org.enginehub.linbus.tree.LinCompoundTag;
 
 import javax.annotation.Nullable;
 import java.lang.ref.WeakReference;
-import java.util.Collections;
 import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionStage;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static com.sk89q.worldedit.bukkit.adapter.impl.fawe.v26_1.PaperweightPlatformAdapter.createInput;
@@ -40,6 +44,7 @@ import static com.sk89q.worldedit.bukkit.adapter.impl.fawe.v26_1.PaperweightPlat
 public class PaperweightFaweWorldNativeAccess implements WorldNativeAccess<LevelChunk,
         net.minecraft.world.level.block.state.BlockState, BlockPos> {
 
+    private static final long OWNER_WAIT_SECONDS = 60L;
     private static final int UPDATE = 1;
     private static final int NOTIFY = 2;
     private static final Direction[] NEIGHBOUR_ORDER = {
@@ -99,7 +104,8 @@ public class PaperweightFaweWorldNativeAccess implements WorldNativeAccess<Level
             net.minecraft.world.level.block.state.BlockState blockState
     ) {
         int currentTick = MinecraftServer.currentTick;
-        if (Fawe.isMainThread()) {
+        var world = BukkitAdapter.adapt(getLevel().getWorld());
+        if (FaweThreadContext.current().ownsChunk(world, levelChunk.locX, levelChunk.locZ)) {
             return levelChunk.setBlockState(blockPos, blockState,
                     this.sideEffectSet.shouldApply(SideEffect.UPDATE) ? 0 : 512
             );
@@ -245,45 +251,84 @@ public class PaperweightFaweWorldNativeAccess implements WorldNativeAccess<Level
             toSend = Set.copyOf(cachedChunksToSend);
             cachedChunksToSend.clear();
         } else {
-            toSend = Collections.emptySet();
+            toSend = Set.of();
         }
-        RunnableVal<Object> runnableVal = new RunnableVal<>() {
-            @Override
-            public void run(Object value) {
-                changes.forEach(cc -> cc.levelChunk.setBlockState(cc.blockPos, cc.blockState,
-                        sideEffectSet.shouldApply(SideEffect.UPDATE) ? 0 : 512
-                ));
-                if (!sendChunks) {
-                    return;
-                }
-                for (IntPair chunk : toSend) {
-                    PaperweightPlatformAdapter.sendChunk(chunk, getLevel().getWorld().getHandle(), chunk.x(), chunk.z());
-                }
-            }
-        };
-        TaskManager.taskManager().async(() -> TaskManager.taskManager().sync(runnableVal));
+        dispatchPartitions(changes, toSend);
     }
 
     @Override
-    public synchronized void flush() {
-        RunnableVal<Object> runnableVal = new RunnableVal<>() {
-            @Override
-            public void run(Object value) {
-                cachedChanges.forEach(cc -> cc.levelChunk.setBlockState(cc.blockPos, cc.blockState,
-                        sideEffectSet.shouldApply(SideEffect.UPDATE) ? 0 : 512
-                ));
-                for (IntPair chunk : cachedChunksToSend) {
-                    PaperweightPlatformAdapter.sendChunk(chunk, getLevel().getWorld().getHandle(), chunk.x(), chunk.z());
-                }
-            }
-        };
-        if (Fawe.isMainThread()) {
-            runnableVal.run();
-        } else {
-            TaskManager.taskManager().sync(runnableVal);
+    public void flush() {
+        Set<CachedChange> changes;
+        Set<IntPair> toSend;
+        synchronized (this) {
+            changes = Set.copyOf(cachedChanges);
+            toSend = Set.copyOf(cachedChunksToSend);
+            cachedChanges.clear();
+            cachedChunksToSend.clear();
         }
-        cachedChanges.clear();
-        cachedChunksToSend.clear();
+        List<CompletionStage<Void>> dispatches = dispatchPartitions(changes, toSend);
+        if (!FaweThreadContext.current().isTickThread()) {
+            awaitDispatches(dispatches);
+        }
+    }
+
+    private List<CompletionStage<Void>> dispatchPartitions(
+            Set<CachedChange> changes,
+            Set<IntPair> toSend
+    ) {
+        Map<IntPair, List<CachedChange>> partitions = ChunkTargetPartitions.partition(
+                changes,
+                change -> new IntPair(change.levelChunk.locX, change.levelChunk.locZ),
+                toSend
+        );
+        var world = BukkitAdapter.adapt(getLevel().getWorld());
+        boolean applyUpdates = sideEffectSet.shouldApply(SideEffect.UPDATE);
+        return ChunkTargetPartitions.dispatchEach(
+                world,
+                partitions,
+                (target, targetChanges) -> {
+                    for (CachedChange change : targetChanges) {
+                        change.levelChunk.setBlockState(
+                                change.blockPos,
+                                change.blockState,
+                                applyUpdates ? 0 : 512
+                        );
+                    }
+                    if (toSend.contains(target)) {
+                        PaperweightPlatformAdapter.sendChunk(
+                                target,
+                                getLevel().getWorld().getHandle(),
+                                target.x(),
+                                target.z()
+                        );
+                    }
+                }
+        );
+    }
+
+    private static void awaitDispatches(List<CompletionStage<Void>> dispatches) {
+        CompletableFuture<?>[] futures = dispatches.stream()
+                .map(CompletionStage::toCompletableFuture)
+                .toArray(CompletableFuture[]::new);
+        try {
+            CompletableFuture.allOf(futures).get(OWNER_WAIT_SECONDS, TimeUnit.SECONDS);
+        } catch (InterruptedException interrupted) {
+            cancelDispatches(futures);
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("Interrupted while awaiting cached chunk flush", interrupted);
+        } catch (ExecutionException failure) {
+            cancelDispatches(futures);
+            throw new IllegalStateException("Cached chunk flush failed", failure.getCause());
+        } catch (TimeoutException timeout) {
+            cancelDispatches(futures);
+            throw new IllegalStateException("Timed out awaiting cached chunk flush", timeout);
+        }
+    }
+
+    private static void cancelDispatches(CompletableFuture<?>[] futures) {
+        for (CompletableFuture<?> future : futures) {
+            future.cancel(false);
+        }
     }
 
     private record CachedChange(

@@ -165,7 +165,10 @@ danger set is `git grep 'RegionTicket'`. Per amendment A1.4 **as extended by r1 
 callbacks of any server-async facility are UNTRUSTED thread contexts — they may capture detached
 results only, and must re-dispatch to the owning coordinator context **before touching live
 state OR FAWE shared operation state** (completion sink, history, backpressure accounting).
-Ticket typing enforces the live-state half; the shared-state half is a coordinator-API rule:
+Ticket typing enforces the live-state half; the shared-state half is a coordinator-API rule
+(r4: the completion executor is the owning coordinator context for detached completion/history
+state ONLY — it grants no live-state ownership and no permission to mutate backpressure outside
+its existing dispatcher contract):
 `OperationCompletion` and backpressure mutation methods are reachable only from dispatcher-run
 contexts, asserted at entry.
 
@@ -190,6 +193,14 @@ close, completion only after persistence boundaries.
 `ownsEntity(...)`, `isFaweWorker()`, `isGlobalContext()`, or removed (assertion-only sites
 subsumed by ticket-required signatures). Requalification record = review artifact. A build-time
 check rejects new production references to `Fawe.isMainThread()` from Folia-enabled source sets.
+**(r12 — perimeter clarification.)** The C5 inventory and build guard cover every production
+predicate used to authorize inline execution or select an ownership-sensitive fallback, including
+`Fawe.isMainThread()`, `Bukkit.isPrimaryThread()`, `MinecraftServer.isSameThread` equivalents,
+direct server-thread identity comparisons, and raw platform tick-thread predicates outside the
+approved backend context implementation. Approved backend predicate implementations are explicit
+exceptions. Every discovered call site requires a C5 disposition; live-state fallbacks additionally
+remain subject to C1 and may not use the legacy Bukkit scheduler. (Count note: the "~20" above is
+stale — the re-derived census is ≈32 for `Fawe.isMainThread()` alone, before this widening.)
 
 **C6 — Global signals.** Global TPS / `MinecraftServer.currentTick` gating is replaced on Folia
 by per-region signals: `FoliaBackpressure.pressure(region)` snapshots, region-drain schedule
@@ -197,6 +208,16 @@ delay, slice runtime (spec §8). `AsyncPreloader` TPS>18 and `QueueHandler.getAl
 Folia equivalents keyed on the target region.
 
 ### 3.1 `FaweThreadContext` — core seam (F1-corrected)
+
+**Resolution is deliberately partial and fail-closed (r12 Q2).** `FaweThreadContext.current()` is
+unavailable before platform-context registration and throws `IllegalStateException` on premature
+access. No platform-neutral fallback context is permitted: defaulting to legacy main-thread
+identity is fail-open on Folia, while defaulting to non-tick/no-ownership changes Paper scheduling
+semantics. Each backend MUST register its context exactly once before constructing or starting any
+component, cache, supplier, scheduler, command path, or adapter capable of reaching a requalified
+predicate. The registered context remains available through `stopAccepting`, drain, and disable
+completion. A production call before registration is a bootstrap-order defect; tests MUST install
+an explicit context. After Bukkit registration, the predicates retain the legacy Paper meanings.
 
 Body from Proposal C; **F1 semantic diff:** no `sealed`/`permits` clause — core cannot name
 downstream implementations, and unnamed-module sealed implementations would need a shared
@@ -219,7 +240,7 @@ public interface FaweThreadContext {
     boolean ownsChunk(World world, int chunkX, int chunkZ);
     boolean ownsEntity(Entity entity);
     boolean isGlobalContext();                       // Folia global-region thread; Paper main
-    boolean isFaweWorker();                          // a FAWE pool thread (A/W)
+    boolean isFaweWorker();                          // extent-carrying FAWE prepare worker
 
     /** Fail-fast guard used at every seam that requires ownership. */
     default void requireOwns(World world, int cx, int cz) {
@@ -349,6 +370,31 @@ public interface FoliaRegionDispatcher {
     record DrainReport(int unresolvedTasks, int liveTickets, List<String> unresolvedLabels) {}
 }
 ```
+
+**Drain-report snapshot at expiry (r15 — reconciles the bounded-expiry rule with the full-report
+contract; NO frozen SPI change, `DrainReport` is unchanged).** The dispatcher maintains an
+immutable diagnostic snapshot **incrementally** as tasks and tickets are registered and retired.
+One atomic snapshot contains the exact `unresolvedTasks` count, the exact `liveTickets` count, and
+a complete immutable view of the corresponding unresolved-task labels from the same snapshot
+epoch. Label indexing uses structural sharing or equivalent bounded-per-update bookkeeping; it
+MUST NOT rebuild or sort the complete label population on a tick thread.
+
+At drain-deadline expiry the bounded flush-expiry hook performs only: (1) its idempotent waiter
+claim, (2) one atomic snapshot read, and (3) submission of that already-built immutable
+`DrainReport` through its registered producer. It performs no label scan, copy, sort, user callback
+or direct future completion. Iterating or rendering the immutable label view happens later on the
+diagnostic consumer, never inside the expiry hook. The snapshot linearization point defines the
+report's deadline state; work settling after that point does not rewrite the published report.
+
+*G6 consequence:* `unresolvedTasks` and `liveTickets` remain exact and mutually coherent at
+expiry; any non-zero count still fails G6 exactly as specified; `unresolvedLabels` remains
+complete diagnostic evidence, neither capped nor truncated; the certification procedure is
+unchanged and may serialize or sort labels after receipt. Label order need only be deterministic —
+the frozen interface does not require lexical sorting at expiry.
+
+*General rule:* any producer requiring an unbounded terminal diagnostic must maintain a publishable
+immutable snapshot incrementally, or define an explicit capped diagnostic contract in advance.
+**Flush-expiry hooks never gain an implicit unbounded-snapshot exception.**
 
 - **Callbacks are typed, not `Runnable`** — live work must accept the capability and name its
   target (w06 attack point 1). `onGlobal` grants no ticket by omission.
@@ -576,6 +622,59 @@ is the frozen architecture-side producer.
 
 ### 3.5 Context-carrying sync (F2-corrected)
 
+**Reachable target-bearing routing (r17 Q1).** `QueueHandlerRouting` — a final
+`@ApiStatus.Internal` class in the same package as `QueueHandler` — is the cross-package internal
+facade for the protected `syncOn` family: static `syncOn(ChunkTarget, RegionCall<T>)`,
+`syncOn(ChunkTarget, RegionTask)`, `syncOn(EntityTarget, EntityTask)`, `syncOnGlobal(GlobalTask)`,
+and `permitsLegacyLocationFreeLiveState()`. It delegates to the active queue handler and names only
+core-owned targets and callbacks; **callers never obtain or name a Folia dispatcher**. The protected
+methods remain subclass extension points, and `TaskManager` gains **no** new supported entry points.
+*Public-surface notice:* these are public JVM declarations because cross-package modules must link
+to them, but they are `@ApiStatus.Internal`, recorded `INTERNAL-NONAPI`, excluded from the §4c
+consumer contract, and carry no compatibility promise — the 653 `PRESERVED` declarations are
+unchanged.
+
+**Multi-target work MUST partition (r17 Q1).** Multi-target work partitions by `ChunkTarget` and
+dispatches each partition separately. **Proving ownership of one — or even of all — targets does
+NOT authorize executing foreign-region work in a single callback.**
+
+**Lazy entity NBT (r17 Q2 — degradation NOT authorized).** A Folia-enabled adapter constructing
+`LazyBaseEntity` from a live entity MUST supply an `EntityTarget` for that same entity, via the
+additive constructor `LazyBaseEntity(EntityType, EntityTarget, Supplier<LinCompoundTag>)`. Lazy NBT
+serialization executes through `QueueHandlerRouting.syncOn(target, ...)` under a fresh
+`EntityTicket`. An owning caller may complete inline; A/W callers may await only under the existing
+bounded-wait rule; a non-owning tick caller **fails before dispatch**, because this synchronous
+getter cannot await. The two-argument constructor remains compatibility-only for non-Folia-enabled
+adapters, and Folia-enabled source sets are build-guarded against using it.
+
+**Section CAS (r17 Q3).** `NMSAdapter` gains
+`protected static <S> CompletionStage<Boolean> setSectionAtomic(World, IntPair, S[], S expected,
+S value, int layer)`. It performs **exactly one** section CAS, solely inside
+`QueueHandlerRouting.syncOn(new ChunkTarget(world, pair.x(), pair.z()), ...)`, and its callback
+asserts the fresh `RegionTicket`. **There is no non-owner CAS branch and no FAWE-lock fallback on
+Folia.** Adapter-26.1 forwarding methods and callers compose this stage rather than blocking a tick
+thread. The legacy String overload survives for excluded Paper adapters: it first requires
+`permitsLegacyLocationFreeLiveState()`, failing before live access on Folia; on the permitted Paper
+backend it uses `isGlobalContext()` — definitionally identical to the legacy main-thread predicate —
+and retains the existing lock/CAS behaviour.
+
+**W1-exit condition (r17).** **Zero temporary C5 allowances may survive W1 exit** in Folia-enabled
+source sets. Any *permanent* compatibility allowance must identify an excluded source set, carry a
+build-enforced non-reachability condition from the Folia adapter graph, and name an explicit
+future-enablement owner. Deferral requires a signed degradation/re-scope; it is **not** implicitly
+authorized. ("No worse than upstream" is not Folia certification.)
+
+**Ownership guards are authorization, not routing (r12 Q1).** An ownership predicate is an
+authorization check, not a routing mechanism. When a callback carries an entity, chunk, or region
+target, the true branch may execute inline only in the owning context. The false branch MUST route
+through the corresponding target-bearing `syncOn` or ticketed dispatcher entry. It MUST NOT fall
+back to location-free `sync` or `syncWhenFree`. Location-free current-tick execution is legal only
+for callbacks whose contract is explicitly current-context-safe and carries no foreign ownership
+target. A wrong-owner callback fails before side effects if its target-bearing route is
+unavailable. *Consequence:* an ownership guard whose false branch funnels into location-free `sync`
+is INERT — it is strictly less safe than the untranslated legacy call, which would at least have
+enqueued.
+
 **F2 semantic diffs from v2:** (a) `RegionKey` is banned from every core or public scheduling
 signature — the internal target is a **core** `ChunkTarget`/`EntityTarget` (a `RegionKey` has
 no chunk anchor and is not schedulable); (b) every internal asynchronous overload returns
@@ -732,6 +831,9 @@ enum TerminalStatus {
     COMMITTED, PARTIALLY_COMMITTED, CANCELLED_BEFORE_MUTATION
 }
 
+/** History persistence settlement of one applied receipt (r4 amendment 2). */
+enum HistorySettlement { NOT_REQUIRED, DURABLE, UNAVAILABLE }
+
 /** Exact applied subset — the undo/report source of truth. */
 record AppliedReceipt(
         long appliedSectionBitmap,
@@ -739,7 +841,8 @@ record AppliedReceipt(
         List<EntityAction> appliedEntities,      // UUID + action actually performed
         List<String> appliedPoiNeighborIds,
         long appliedLightSections,
-        PacketPhaseResult packetResult
+        PacketPhaseResult packetResult,
+        HistorySettlement historySettlement      // finalized before result publication (r4 am. 2)
 ) {}
 
 /** Terminal record, keyed. Duplicates by key are ignored (counted diagnostically). */
@@ -790,10 +893,363 @@ the bounded `drain` deadline; no tick context waits for shutdown drain. **Drain
 terminalization (required wording):** Expiry of the shutdown drain deadline does not create an
 `INCOMPLETE` terminal state. Every registered plan that has not mutated terminates as
 `CANCELLED_BEFORE_MUTATION` or `FAILED_BEFORE_MUTATION`. Every plan that has mutated reaches
-APPLIED persistence with its exact receipt and terminates `PARTIALLY_COMMITTED` unless it
-completes cleanly. Non-zero unresolved tasks or live tickets in `DrainReport` constitute a
+persistence settlement (§3.6b) with its exact receipt. Its `TerminalStatus` continues to
+describe the world mutation outcome: fully applied work remains `COMMITTED`, partially
+applied work is `PARTIALLY_COMMITTED`; persistence failure is represented only by
+`HistorySettlement.UNAVAILABLE` and the resulting `OperationResult` classification. Non-zero unresolved tasks or live tickets in `DrainReport` constitute a
 failed certification gate; the report does not substitute for operation terminalization.
 Drain duration and unresolved counts remain certification measurements (F10 seam).
+
+**§3.6b Persistence settlement + completion service (adjudication 2026-07-17 of the task-11
+NEEDS_CONTEXT escalation; CO-SIGNED r6, re-CO-SIGNED r9 after the r8 notification-isolation
+amendment — r4 amendments 1–5 + r5 drain-status correction + r8 amendment 1 applied;
+`codex-arch-cosign-r4..r9` = `.codex/arch-cosign-r{4,5,6,7,8,9}.msg`).**
+
+*Persistence settlement.* The completion gate's "every APPLIED record has reached its
+configured persistence boundary" is defined as **settlement**: the persistence attempt either
+(a) durably succeeds (`DURABLE`), or (b) terminally fails (`UNAVAILABLE`) after the
+configured bounded retry policy (attempt count + backoff; config-gated, W1-exit numeric slot
+`HISTORY_PERSIST_RETRIES`). Every persistence attempt has a finite timeout, and the complete
+retry sequence has a finite settlement deadline. Timeout, cancellation, or exceptional
+completion consumes an attempt. On shutdown, the remaining settlement deadline is clamped to
+the drain deadline. Exhaustion produces terminal `UNAVAILABLE` settlement. No configuration
+may select unbounded attempts, backoff, or attempt duration. The retry timer remains
+lifecycle-guaranteed until settlement flush completes. A terminal persistence failure NEVER
+decrements or bypasses the gate — it settles it with a recorded outcome:
+- The affected `AppliedReceipt` carries `historySettlement = UNAVAILABLE` (the
+  `HistorySettlement` field of §3.6; exact applied subset is still reported; nothing is
+  invented). No receipt exposed through `OperationResult` may remain pending: the coordinator
+  finalizes the receipt's settlement before publishing the operation result. Terminal
+  deduplication remains keyed only by `(operationId, chunkKey, planSequence)`.
+- **Status separation (r4 amendment 4):** `TerminalStatus` describes world mutation only and
+  is not changed solely by persistence failure. `OperationResult` is `PARTIAL` when any world
+  mutation was applied and any required settlement or finalizer failed; `FAILED` when no
+  world mutation was applied; `SUCCEEDED` only when all required persistence settlements are
+  `DURABLE`. The actor-facing message states that the listed chunks committed but their
+  undo/history could not be persisted. Exactly once, never `SUCCEEDED` under a failed
+  required settlement.
+- *History scope:* if the history implementation publishes one operation-scoped undo entry,
+  any `UNAVAILABLE` required settlement makes that entire entry unusable. A durable subset
+  may remain usable only when the persistence format provides independently addressable
+  subset entries and the actor result identifies that subset explicitly. History must never
+  be exposed as usable when its boundary was not reached (spec §4d sentence 3).
+This satisfies, simultaneously: the gate (settlement, not skip), exactly-once actor
+completion (spec §4d sentence 2), and history honesty. Spec §4d's "valid matching undo
+record" clause binds its enumerated interruption classes (cancellation, timeout, unload,
+migration, disable) — a persistence-subsystem fault is not in that class and yields the
+explicit lossy-failure result above; no amendment to spec §4d is required.
+
+*Completion service.* Terminal aggregation runs on the completion service's dedicated
+single-thread control executor — a **backend-owned completion service** created at backend
+bootstrap and shared by per-operation coordinators. Publication of
+`OperationCompletion.future()` and every other externally observable stage completion is
+delegated as an immutable outcome to the service's lifecycle-owned isolated notification
+tasks (r8 amendment 1). Synchronous consumer continuations never run on the control
+executor. Completion flush waits for internal transitions and outcome publication, not for
+arbitrary consumer continuations to return. Its thread is **not**
+`FaweThread`-marked (§3.1: the marker denotes extent-carrying prepare workers only). The
+service has `ACCEPTING → FLUSHING → TERMINATED` lifecycle states (r4 amendment 3). Every
+asynchronous producer (persistence and finalizer callbacks included) registers before
+initiating its boundary and deregisters only after its coordinator transition has executed.
+Flush first closes producer registration, then waits for the registered-producer count to
+reach zero and for all queued completion work to execute; only then may the executor shut
+down (`stopAccepting` → drain → completion flush → executor shutdown).
+
+**Drain-expiry terminalizers (r10 Q1).** Every plan producer and admission-open coordinator
+producer registers, atomically with producer registration, a bounded idempotent flush-expiry
+hook. Entering `FLUSHING` publishes the absolute drain deadline to every outstanding hook;
+deadline expiry invokes each hook exactly once. The plan-state owner atomically freezes its last
+applied state and terminalizes it: no mutation → `CANCELLED_BEFORE_MUTATION` or
+`FAILED_BEFORE_MUTATION`; any mutation → the truthful world-mutation `TerminalStatus`, exact
+current receipt, and `HistorySettlement.UNAVAILABLE` where persistence cannot settle durably. The
+hook runs no user code or live-state work and cannot leave its producer registered. `flush` is
+itself deadline-bounded and waits after expiry only for these bounded internal transitions and
+immutable outcome publication, never for consumer continuations. No registered plan or
+admission-open coordinator may lack this hook.
+
+**Post-termination inline fallback (r10 Q4, replacing the earlier concession).** Post-termination
+inline fallback is permitted only for a non-tick asynchronous callback, under the coordinator
+serialization primitive, and only for bounded internal state work that runs no user code,
+performs no live-state access, and does not scan an unbounded registration set. A tick-thread
+caller encountering `TERMINATED` fails before acquiring the serialization primitive or mutating
+state; it never executes the inline fallback. Operation coordinators and sequencer registrations
+hold lifecycle producers until admission closure, sequencing publication, and terminal outcome
+publication respectively, so no valid tick-thread transition can arrive after service
+termination. Per C1: this executor
+is the owning coordinator context for detached completion/history state only; it grants no
+live-state ownership and no backpressure mutation outside the dispatcher contract.
+
+**§3.6c Settlement/notification separation for admission completions (re-plan adjudication
+2026-07-17 of the task-13 terminal corrective; CO-SIGNED r9 — r7 amendments 1–4 and the r8
+ordering/isolation hardening applied; `.codex/arch-cosign-r9.msg`).**
+
+The task-13 corrective loop proved a real tension: a single serialized completion executor
+cannot both order state transitions and keep deadline expiry non-blockable while
+`future.complete` runs synchronous user continuations. Resolution — two phases with
+different guarantees:
+
+1. **State settlement** (admission granted/rejected/expired/cancelled; permit accounting;
+   waiter removal): executes under the backpressure accounting lock or equivalent atomic
+   internal machinery. It NEVER runs user code, never completes futures, and is therefore
+   non-blockable. Deadline expiry is a state settlement: once settled, the expiry is
+   effective for every subsequent admission decision immediately, regardless of when its
+   notification is delivered. Settlement order is the serialization that matters; it is
+   total per region under the accounting lock.
+2. **Notification delivery** (completing the acquire stages, invoking the rejection hook):
+   after settlement, a delivery command is handed to the INJECTED completion sink — the
+   backend-owned §3.6b completion service. Backpressure owns NO completion thread, no
+   fallback drainer, no serialization primitive of its own. **Producer-fence enrollment
+   (r7 amendment 1; ordering hardened by r8 amendment 2):** completion-service
+   producer-lease acquisition is admission PREFLIGHT and occurs before
+   `OperationCompletion.register` and before backpressure accounting. If the lease cannot
+   be acquired because the service is `FLUSHING` or `TERMINATED`, the request fails
+   synchronously before plan registration or any accounting side effect.
+
+   **Obligation-scoped producer fencing (r11 Q1 — RESCINDS r10 Q2's coupling of the admission
+   lease to plan-producer registration).** A plan's `PlanProducerToken` fences
+   `OperationCompletion.register` and terminalization. It is acquired outside the owner-thread
+   fast path and is independent of admission notification. `tryAcquire` is synchronous and
+   produces no asynchronous delivery; it acquires no `AdmissionDeliveryLease`, touches no
+   completion-service lock, allocates no notification stage, and starts no thread.
+   `Optional.empty()` is a fast-path miss, not an admission rejection. The caller either enters
+   the asynchronous path or terminalizes the already-registered plan through its plan producer.
+   The asynchronous `acquire` and `acquireContinuation` paths lazily acquire one waiter-specific
+   `AdmissionProducer` immediately before waiter accounting. Failure to acquire it rejects before
+   waiter accounting; the already-registered plan is notified through its independent plan
+   producer. A G-A1 call lacking a pre-acquired `PlanProducerToken` is ineligible and falls back
+   before calling `tryAcquire`. **Ownership split:** task 13 owns only waiter-specific
+   asynchronous producers; task 14 owns plan-producer preflight and registration. Once a plan is
+   registered, its lease is guaranteed and every settlement, including lifecycle rejection,
+   has a fenced delivery path to exactly one terminal notification. The lease remains
+   registered through execution of its delivery command. During `FLUSHING`, delivery
+   commands associated with existing leases remain accepted.
+   Backpressure never invokes the post-termination inline fallback from a tick thread.
+   Reaching `TERMINATED` with an outstanding admission-delivery lease is an invariant
+   failure. Completion flush thereby accounts for outstanding deadline/cancellation
+   notifications.
+   **Notification isolation (r7 amendment 2):** the completion service's single control
+   executor never directly invokes an externally observable future completion that can run
+   arbitrary synchronous continuations on that control thread. It publishes immutable
+   delivery outcomes through lifecycle-owned, isolated notification tasks. A blocked
+   consumer continuation may delay only that consumer; it cannot stop other notifications,
+   coordinator transitions, producer-fence quiescence, or shutdown flush. The notification
+   mechanism remains part of the one backend-owned completion service.
+   Delivery delay never blocks settlement or execution of subsequent admission decisions.
+   All settled reservations remain visible to those decisions and may legitimately
+   contribute to saturation until released (r7 amendment 4).
+3. **Attempt identity and supersession (r7 amendment 3):** every admission request has an
+   internal monotonic `admissionAttemptId`; its settlement and delivery command carry that
+   identity. Delivery is idempotent per attempt and cannot affect another attempt.
+   Re-acquiring a terminally rejected registered plan requires a new plan
+   sequence/registration. If a granted attempt is cancelled before grant delivery, the
+   undelivered grant is superseded by cancellation, its permit accounting is released
+   exactly once, and delivery reports cancellation rather than exposing a closed permit.
+   If grant was already delivered, cancellation follows the normal permit lifecycle. No
+   public SPI change; the identity belongs to the internal waiter/delivery collaborator.
+4. **Tick-thread settlement paths (REPLACED by r14 Q2 — the earlier wording was overbroad).**
+   Admission-attempt settlement with an unpublished outcome enqueues that outcome through the
+   attempt's live `AdmissionProducer`. **After successful grant publication, permit lifecycle
+   transitions — `transfer`, `enter(FINALIZING)` and `close` — are pure, synchronous accounting
+   operations and require no admission producer or delivery lease.** They complete no stage,
+   invoke no callback, and publish no permit-lifecycle notification. If releasing capacity makes a
+   queued waiter eligible, the resulting waiter work is submitted through **that waiter's own live
+   `AdmissionProducer`**, never through the released producer of the permit causing the capacity
+   change.
+   These tick-thread accounting paths remain nonblocking under §1b: they **MUST NOT wait on
+   `accountingLock` or enter completion serialization**. Their implementation must use
+   owner-local/atomic accounting or an equivalent bounded no-wait handoff that guarantees
+   exactly-once release. `close` remains idempotent. No permit-lifecycle transition directly
+   notifies anyone; observable effects are limited to synchronous permit state, pulled pressure
+   snapshots, and indirect completion of newly eligible waiters through those waiters' producers.
+   **(r12 Q4, retained)** Tick-thread paths never acquire the post-termination serialization lock
+   and never perform aggregate result construction.
+5. The §3.4 backpressure SPI javadoc "completes on a FAWE executor" binds the DELIVERY
+   phase; stage-completion threads are the completion service's notification tasks, per
+   §3.6b.
+6. **Admission-waiter drain hook (r11 Q2).** Every queued asynchronous waiter owns one
+   `AdmissionProducer` with a bounded idempotent flush-expiry hook registered before the waiter
+   enters accounting. At drain-deadline expiry the hook atomically settles that attempt only: it
+   removes a queued waiter and reports lifecycle rejection, or supersedes a granted-but-undelivered
+   permit with cancellation and releases its accounting exactly once. It then publishes the
+   immutable outcome through the same producer. The hook performs no waiter-set scan, user
+   callback, or future completion. The producer remains fenced until outcome publication, after
+   which its timer and hook are cancelled and released. The resulting rejection terminalizes the
+   associated registered plan as `NOT_ACCEPTED`; plan-key deduplication handles any concurrent
+   plan-level drain terminalizer.
+7. **Deadline scheduling (r11 Q3).** Admission deadlines are scheduled exclusively through the
+   waiter's lifecycle-fenced `AdmissionProducer.schedule(...)`, backed by the completion service's
+   dedicated retry timer. Backpressure must NOT use `CompletableFuture.delayedExecutor`,
+   `ForkJoinPool.commonPool`, or any unfenced executor. Deadline firing first linearizes expiry
+   through a nonblocking attempt-state transition, making the attempt ineligible for grant
+   immediately; bounded accounting removal and immutable delivery submission then run through the
+   completion-service control path. The timer thread never waits on the accounting lock and never
+   runs delivery or user code. Cancellation or settlement cancels the retained timer handle.
+   Backpressure owns no timer and no executor.
+8. **Caller-supplied cancellation stage (r11 Q4).** A caller-supplied cancellation stage is an
+   UNTRUSTED thread context. Backpressure attaches only an O(1), nonblocking hop whose inline body
+   captures the cancellation outcome and submits an immutable cancellation command through the
+   waiter's registered `AdmissionProducer`. Accounting settlement runs on the completion-service
+   control path; notification uses isolated publication. No accounting lock, waiter scan, permit
+   transition, hook invocation, future completion, or notification-task creation may run on the
+   thread completing the supplied stage. The same rule applies when the stage is already complete
+   at attachment.
+
+Consequence for the frozen SPI: `FoliaBackpressure` implementations take the completion
+sink as an injected collaborator (task-17 wiring; task-14 passes it through). No public
+signature changes.
+
+**§3.6d Producer collaborator contract (r13 — concrete signatures for the three r11 types;
+clarification of r11, NO frozen SPI change: neither `OperationCompletion` nor `FoliaBackpressure`
+changes).** Two service acquisitions only; `AdmissionDeliveryLease` is created ATOMICALLY with its
+`AdmissionProducer` and has no independent acquisition — an independent one would recreate the
+preflight gap r11 closed.
+
+```java
+public final class OperationCompletionService {
+    public Optional<PlanProducerToken> tryAcquirePlanProducer(
+            UUID operationId, long chunkKey, long planSequence,
+            FlushExpiryHook ownerFlushExpiry, Consumer<Throwable> transitionFailure);
+
+    public <T> Optional<AdmissionProducer<T>> tryAcquireAdmissionProducer(
+            long admissionAttemptId, PlanProducerToken registeredPlan);
+
+    public final class PlanProducerToken {
+        public UUID operationId();
+        public long chunkKey();
+        public long planSequence();
+        /** Queues the exact terminal record. True only when this call claims terminalization. */
+        public boolean terminal(ChunkTerminalRecord record);
+        /** Terminalizes as NOT_ACCEPTED with an empty receipt and the supplied cause. */
+        public boolean rejectAdmission(Throwable cause);
+    }
+
+    public final class AdmissionProducer<T> {
+        public AdmissionDeliveryLease<T> delivery();
+        /** Installs waiter expiry + transition-failure settlement. Exactly once, BEFORE waiter
+         *  accounting. Returns false when lifecycle expiry already won — accounting must not begin. */
+        public boolean arm(FlushExpiryHook waiterFlushExpiry, Consumer<Throwable> transitionFailure);
+        /** O(1), nonblocking submission to the control path. Takes no lifecycleLock. */
+        public boolean submit(Runnable transition);
+        /** The SOLE admission-deadline mechanism. */
+        public ScheduledFuture<?> schedule(Duration delay, BooleanSupplier linearizeExpiry,
+                Runnable expirySettlement);
+        /** Orders plan NOT_ACCEPTED terminalization before exceptional notification publication. */
+        public boolean reject(Throwable cause);
+    }
+
+    public final class AdmissionDeliveryLease<T> {
+        public CompletionStage<T> future();
+        /** Publishes the successful immutable outcome exactly once. */
+        public boolean deliver(T immutableOutcome);
+    }
+}
+```
+
+`AdmissionDeliveryLease` has **no** `deliverExceptionally`: all failure delivery goes through
+`AdmissionProducer.reject(...)`, which preserves plan-terminal ordering. The Folia path gains the
+non-SPI overload `DefaultOperationCompletion.register(PlanProducerToken)`, which consumes the
+token's registration capability and validates all three identity fields; the frozen
+`OperationCompletion.register(long, long)` is unchanged. Task 14 hands the registered token to
+task 13 through the internal `DefaultFoliaBackpressure.bind(PlanProducerToken)` adapter, which
+still implements the frozen `FoliaBackpressure` unchanged — **no `ThreadLocal` and no
+`operationId` lookup is permitted**.
+
+*Lifecycle.* `PlanProducerToken`: acquired immediately before plan registration, outside every
+tick-thread fast path; acquisition MAY take `lifecycleLock`; `ACCEPTING` registers producer +
+`ownerFlushExpiry` atomically, `FLUSHING`/`TERMINATED` return empty without side effects;
+`register(token)` consumes it exactly once and a live token stays consumable during `FLUSHING`
+unless expiry won first; `terminal`/`rejectAdmission` are O(1), nonblocking, take no
+`lifecycleLock`; the coordinator owns release after terminal processing and required persistence
+settlement — task 14 never closes it; `TERMINATED` with a live token is an invariant failure.
+`AdmissionProducer`: acquired ONLY by asynchronous `acquire`/`acquireContinuation`, immediately
+before waiter accounting, and requires an already-consumed still-live token; acquisition may take
+`lifecycleLock`, allocate the isolated stage and install an internal expiry trampoline but starts
+NO thread; on `FLUSHING`/`TERMINATED` it returns empty and task 13 calls
+`registeredPlan.rejectAdmission(cause)` since the plan is already registered; `arm` precedes
+accounting and its internal trampoline guarantees no producer ever lacks a flush terminalizer;
+`schedule` is legal only after `arm`, is clamped to the published drain deadline, and its timer
+invokes only the O(1) `linearizeExpiry` before submitting the prebuilt `expirySettlement`;
+`submit`, `reject` and timer firing take no `lifecycleLock` — this is the r11 Q4 cancellation hop;
+release occurs only after one immutable outcome is published and cancels the retained timer and
+hook; producers stay usable through `FLUSHING`, none may survive `TERMINATED`.
+`AdmissionDeliveryLease`: `future()` is isolated and starts no thread; delivery is O(1),
+nonblocking, valid during `FLUSHING`; release follows outcome publication, never consumer
+continuation.
+
+**Three-outcome CAS (r14 Q1).** `AdmissionProducer<T>` gains a third outcome entry:
+
+```java
+/** Publishes cancellation exceptionally WITHOUT terminalizing the associated plan as
+ *  NOT_ACCEPTED. Competes with deliver(...) and reject(...) on the same attempt-level CAS. */
+public boolean cancel(CancellationException cause);
+```
+
+Each admission attempt has one outcome CAS with three terminal outcomes: grant, rejection, or
+cancellation. `AdmissionDeliveryLease.deliver(...)`, `AdmissionProducer.reject(...)` and
+`AdmissionProducer.cancel(...)` compete on that CAS; exactly one returns `true`. "Granted but
+undelivered" means backpressure state is `GRANTED` while this outcome CAS remains unclaimed.
+Successful `deliver(...)` is the grant-delivery linearization point, even if isolated notification
+or consumer observation occurs later. Plan consequences: `reject` winning terminalizes the plan
+`NOT_ACCEPTED` and retry requires a NEW plan sequence; **`cancel` winning completes the admission
+future exceptionally but does NOT terminalize the plan — the same registered plan sequence may
+retry admission**; `deliver` winning means later cancellation follows the normal permit lifecycle.
+If operation-level cancellation abandons the plan rather than retrying, task 14 explicitly
+terminalizes it `CANCELLED_BEFORE_MUTATION` through `PlanProducerToken` — admission cancellation
+never infers that decision. When cancellation supersedes a backpressure-level `GRANTED` state
+before `deliver(...)`, task 13 releases the permit accounting exactly once before calling
+`cancel(...)`.
+
+*Plan/waiter ordering.* Identities stay distinct: plan dedup on `(operationId, chunkKey,
+planSequence)`, admission-delivery dedup on `admissionAttemptId`. Waiter rejection order is:
+(1) backpressure linearizes waiter/accounting settlement; (2) `AdmissionProducer.reject(cause)`
+submits `registeredPlan.rejectAdmission(cause)`; (3) the same serialized command publishes the
+exceptional admission outcome; (4) a concurrent plan-level drain terminalizer competes on the plan
+key — the first plan terminal transition wins and the other is a duplicate that never decrements
+completion accounting. A delayed rejection notification therefore cannot race a re-acquire under
+the old plan sequence, because re-acquisition requires a new plan sequence.
+
+**Unconsumed plan-token ownership (r16).** `PlanProducerToken` gains:
+
+```java
+/** Releases an unconsumed token without registering or terminalizing a plan and without
+ *  publishing an outcome.
+ *  @return true if this call changed ACQUIRED to ABORTED; false if abort or flush expiry already won
+ *  @throws IllegalStateException if registration already consumed the token */
+public boolean abort(Throwable cause);
+```
+
+Acquiring a `PlanProducerToken` creates a **linear obligation**: the holder MUST either transfer it
+by a successful `DefaultOperationCompletion.register(token)` or abort it. `abort(cause)` atomically
+cancels the unconsumed token's flush hook, deregisters its producer, and records the cause
+diagnostically. It creates no plan registration, terminal record, or observable outcome.
+**`register(token)` is transactional:** every validation or insertion failure before successful
+ownership transfer MUST invoke `token.abort(failure)` before rethrowing — so the four rejection
+paths clean up automatically and task 14 needs no exception-specific handling, though it MUST call
+`abort(...)` if it elects not to call `register(...)` at all. Once consumed, the coordinator
+exclusively owns release. Abort and flush expiry compete idempotently; exactly one deregisters.
+
+*Abandoned tokens.* Abandonment without `register` or `abort` is an **invariant failure**, and must
+be detectable as an unconsumed-token diagnostic/count. During `FLUSHING` the token stays temporarily
+consumable; at the drain deadline its expiry hook records the abandonment, aborts it, and
+deregisters the producer — so flush remains **bounded rather than hanging**. **No GC finalizer or
+`Cleaner` may provide correctness.**
+
+*Admission producers — the rule does NOT transfer unchanged.* There is **no**
+`AdmissionProducer.abort(...)`. `arm(...) == false` means lifecycle expiry already owns the attempt:
+the internal expiry trampoline MUST reject the associated registered plan as `NOT_ACCEPTED`, publish
+the exceptional admission outcome, and release the producer — the caller performs no accounting and
+needs no further cleanup call. Before `arm`, `AdmissionProducer.reject(Throwable)` is explicitly
+legal and a caller hitting a setup failure after acquisition but before accounting MUST use it,
+since the attempt already belongs to a registered plan and cannot disappear silently. Abandoning an
+unarmed producer is an invariant failure; at flush expiry its trampoline force-rejects and releases
+it while recording the unarmed-producer diagnostic.
+
+*Amendment-3 boundary.* These collaborators neither change nor assume
+`OperationCompletion.closeAdmission()`. If `tryAcquirePlanProducer` returns empty, no plan was
+registered and these types provide NO aggregate pre-registration-cause channel; if A3.1 is signed,
+task 14 passes that refusal cause through the amended contract. Until then that classification
+remains the open user gate. The obsolete internal shapes `tryAcquireLease(..., registrationKey)`,
+lease-coupled `registerProducer(...)` and `claimRegisteredProducer(...)` are REPLACED.
 
 ### 3.7 Engine behavior — lanes, slicing, interleaving, GET lifecycle
 

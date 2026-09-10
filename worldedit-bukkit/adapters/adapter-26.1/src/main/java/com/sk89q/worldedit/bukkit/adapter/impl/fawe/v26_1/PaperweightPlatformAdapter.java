@@ -5,18 +5,23 @@ import ca.spottedleaf.moonrise.patches.chunk_system.scheduling.ChunkHolderManage
 import com.fastasyncworldedit.bukkit.adapter.CachedBukkitAdapter;
 import com.fastasyncworldedit.bukkit.adapter.DelegateSemaphore;
 import com.fastasyncworldedit.bukkit.adapter.NMSAdapter;
-import com.fastasyncworldedit.core.Fawe;
 import com.fastasyncworldedit.core.FaweCache;
 import com.fastasyncworldedit.core.math.BitArrayUnstretched;
 import com.fastasyncworldedit.core.math.IntPair;
 import com.fastasyncworldedit.core.util.MathMan;
 import com.fastasyncworldedit.core.util.TaskManager;
+import com.fastasyncworldedit.core.util.task.FaweThreadContext;
+import com.google.common.cache.CacheBuilder;
+import com.google.common.cache.CacheLoader;
+import com.google.common.cache.LoadingCache;
 import com.mojang.serialization.DataResult;
+import com.sk89q.worldedit.bukkit.BukkitAdapter;
 import com.sk89q.worldedit.bukkit.WorldEditPlugin;
 import com.sk89q.worldedit.bukkit.adapter.BukkitImplAdapter;
 import com.sk89q.worldedit.bukkit.adapter.Refraction;
 import com.sk89q.worldedit.bukkit.adapter.impl.v26_1.PaperweightBlockMaterial;
 import com.sk89q.worldedit.internal.util.LogManagerCompat;
+import com.sk89q.worldedit.world.World;
 import com.sk89q.worldedit.world.biome.BiomeType;
 import com.sk89q.worldedit.world.biome.BiomeTypes;
 import com.sk89q.worldedit.world.block.BlockTypesCache;
@@ -70,6 +75,7 @@ import java.util.List;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionStage;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Semaphore;
 import java.util.function.IntFunction;
@@ -103,6 +109,10 @@ public final class PaperweightPlatformAdapter extends NMSAdapter {
     private static final Field fieldRemove;
 
     private static final Logger LOGGER = LogManagerCompat.getLogger();
+
+    private static final LoadingCache<ServerLevel, World> WORLD_WRAPPERS = CacheBuilder.newBuilder()
+            .weakKeys()
+            .build(CacheLoader.from(serverLevel -> BukkitAdapter.adapt(serverLevel.getWorld())));
 
     private static Field SERVER_LEVEL_ENTITY_MANAGER;
 
@@ -217,15 +227,15 @@ public final class PaperweightPlatformAdapter extends NMSAdapter {
         );
     }
 
-    static boolean setSectionAtomic(
-            String worldName,
+    static CompletionStage<Boolean> setSectionAtomic(
+            World world,
             IntPair pair,
             LevelChunkSection[] sections,
             LevelChunkSection expected,
             LevelChunkSection value,
             int layer
     ) {
-        return NMSAdapter.setSectionAtomic(worldName, pair, sections, expected, value, layer);
+        return NMSAdapter.setSectionAtomic(world, pair, sections, expected, value, layer);
     }
 
     // There is no point in having a functional semaphore for paper servers.
@@ -302,7 +312,8 @@ public final class PaperweightPlatformAdapter extends NMSAdapter {
             if (nmsChunk != null) {
                 return nmsChunk;
             }
-            if (Fawe.isMainThread()) {
+            // Folia port: synchronous chunk loading requires ownership of this exact chunk.
+            if (ownsChunk(serverLevel, chunkX, chunkZ)) {
                 return serverLevel.getChunk(chunkX, chunkZ);
             }
             return null;
@@ -318,11 +329,20 @@ public final class PaperweightPlatformAdapter extends NMSAdapter {
                 return nmsChunk;
             }
             // Avoid "async" methods from the main thread.
-            if (Fawe.isMainThread()) {
+            // Folia port: synchronous chunk loading requires ownership of this exact chunk.
+            if (ownsChunk(serverLevel, chunkX, chunkZ)) {
                 return serverLevel.getChunk(chunkX, chunkZ);
             }
             return null;
         }
+    }
+
+    private static boolean ownsChunk(ServerLevel serverLevel, int chunkX, int chunkZ) {
+        return FaweThreadContext.current().ownsChunk(
+                WORLD_WRAPPERS.getUnchecked(serverLevel),
+                chunkX,
+                chunkZ
+        );
     }
 
     private static void addTicket(ServerLevel serverLevel, int chunkX, int chunkZ) {

@@ -23,7 +23,9 @@ public interface FaweThreadContext {
 
     boolean isGlobalContext();                       // Folia global-region thread; Paper main
 
-    boolean isFaweWorker();                          // a FAWE pool thread (A/W)
+    boolean isFaweWorker();                          // an extent-carrying FAWE prepare-pool thread
+                                                     // (FaweThread-marked); NOT every FAWE-owned
+                                                     // thread (UUID-queue/TaskManager pools excluded)
 
     /** Fail-fast guard used at every seam that requires ownership. */
     default void requireOwns(World world, int cx, int cz) {
